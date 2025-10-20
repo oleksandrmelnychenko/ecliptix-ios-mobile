@@ -127,9 +127,13 @@ public final class ProtocolChainStep: KeyProvider {
         return .success(Data(chainKey))
     }
 
-    // MARK: - Get DH Public Key
+    // MARK: - Get DH Keys
     public func getDhPublicKey() -> Data? {
         return dhPublicKey.map { Data($0) }
+    }
+
+    public func getDhPrivateKey() -> Data? {
+        return dhPrivateKey.map { Data($0) }
     }
 
     // MARK: - Execute With Key (KeyProvider conformance)
@@ -232,7 +236,7 @@ public final class ProtocolChainStep: KeyProvider {
     // MARK: - Prune Old Keys
     /// Removes keys outside the cache window to limit memory usage
     /// Migrated from: PruneOldKeys()
-    private func pruneOldKeys() {
+    public func pruneOldKeys() {
         let windowStart = currentIndex > cacheWindow ? currentIndex - cacheWindow : 0
 
         let keysToRemove = messageKeys.keys.filter { $0 < windowStart }
@@ -242,6 +246,106 @@ public final class ProtocolChainStep: KeyProvider {
             }
             messageKeys.removeValue(forKey: key)
         }
+    }
+
+    // MARK: - Update Keys After DH Ratchet
+    /// Updates keys after a DH ratchet operation
+    /// Migrated from: UpdateKeysAfterDhRatchet()
+    public func updateKeysAfterDhRatchet(
+        newChainKey: Data,
+        newDhPrivateKey: Data? = nil,
+        newDhPublicKey: Data? = nil
+    ) -> Result<Unit, ProtocolFailure> {
+        guard !isDisposed else {
+            return .failure(.generic("ProtocolChainStep has been disposed"))
+        }
+
+        // Clear old message keys
+        for key in messageKeys.keys {
+            if var data = messageKeys[key] {
+                CryptographicHelpers.secureWipe(&data)
+            }
+        }
+        messageKeys.removeAll()
+
+        // Update chain key
+        CryptographicHelpers.secureWipe(&chainKey)
+        chainKey = Data(newChainKey)
+
+        // Reset index
+        currentIndex = Self.initialIndex
+
+        // Update DH keys if provided
+        if let newPrivKey = newDhPrivateKey, let newPubKey = newDhPublicKey {
+            if dhPrivateKey != nil {
+                CryptographicHelpers.secureWipe(&dhPrivateKey!)
+            }
+            if dhPublicKey != nil {
+                CryptographicHelpers.secureWipe(&dhPublicKey!)
+            }
+            dhPrivateKey = Data(newPrivKey)
+            dhPublicKey = Data(newPubKey)
+        }
+
+        return .success(.value)
+    }
+
+    // MARK: - State Serialization
+    /// Serializes chain step to protobuf format
+    /// Migrated from: ToProtoState()
+    public func toProtoState() -> Result<ChainStepState, ProtocolFailure> {
+        guard !isDisposed else {
+            return .failure(.generic("ProtocolChainStep has been disposed"))
+        }
+
+        // Convert cached message keys
+        let cachedKeys = messageKeys.map { index, keyMaterial in
+            CachedMessageKey(index: index, keyMaterial: keyMaterial)
+        }
+
+        let state = ChainStepState(
+            currentIndex: currentIndex,
+            chainKey: chainKey,
+            dhPrivateKey: dhPrivateKey ?? Data(),
+            dhPublicKey: dhPublicKey ?? Data(),
+            cachedMessageKeys: cachedKeys
+        )
+
+        return .success(state)
+    }
+
+    /// Restores chain step from protobuf state
+    /// Migrated from: FromProtoState()
+    public static func fromProtoState(
+        stepType: ChainStepType,
+        state: ChainStepState
+    ) -> Result<ProtocolChainStep, ProtocolFailure> {
+        // Validate chain key
+        guard state.chainKey.count == CryptographicConstants.x25519KeySize else {
+            return .failure(.generic("Invalid chain key size in proto state"))
+        }
+
+        // Extract DH keys if present
+        let dhPrivateKey = state.dhPrivateKey.isEmpty ? nil : Data(state.dhPrivateKey)
+        let dhPublicKey = state.dhPublicKey.isEmpty ? nil : Data(state.dhPublicKey)
+
+        let step = ProtocolChainStep(
+            stepType: stepType,
+            chainKey: Data(state.chainKey),
+            dhPrivateKey: dhPrivateKey,
+            dhPublicKey: dhPublicKey,
+            cacheWindowSize: defaultCacheWindowSize
+        )
+
+        // Restore current index
+        step.currentIndex = state.currentIndex
+
+        // Restore cached message keys
+        for cachedKey in state.cachedMessageKeys {
+            step.messageKeys[cachedKey.index] = Data(cachedKey.keyMaterial)
+        }
+
+        return .success(step)
     }
 
     // MARK: - Dispose

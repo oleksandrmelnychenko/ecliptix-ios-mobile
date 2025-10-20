@@ -159,6 +159,174 @@ public struct SecureEnvelope: Codable {
     }
 }
 
+// MARK: - Protocol State Types
+/// These types correspond to protocol_state.proto
+
+// MARK: - Ratchet State
+/// Corresponds to RatchetState in protocol_state.proto
+public struct RatchetState: Codable {
+    public var isInitiator: Bool
+    public var createdAt: Date
+    public var nonceCounter: UInt64
+    public var peerBundle: PublicKeyBundle?
+    public var peerDhPublicKey: Data
+    public var isFirstReceivingRatchet: Bool
+    public var rootKey: Data
+    public var sendingStep: ChainStepState
+    public var receivingStep: ChainStepState?
+
+    public init(
+        isInitiator: Bool,
+        createdAt: Date,
+        nonceCounter: UInt64,
+        peerBundle: PublicKeyBundle?,
+        peerDhPublicKey: Data,
+        isFirstReceivingRatchet: Bool,
+        rootKey: Data,
+        sendingStep: ChainStepState,
+        receivingStep: ChainStepState?
+    ) {
+        self.isInitiator = isInitiator
+        self.createdAt = createdAt
+        self.nonceCounter = nonceCounter
+        self.peerBundle = peerBundle
+        self.peerDhPublicKey = peerDhPublicKey
+        self.isFirstReceivingRatchet = isFirstReceivingRatchet
+        self.rootKey = rootKey
+        self.sendingStep = sendingStep
+        self.receivingStep = receivingStep
+    }
+}
+
+// MARK: - Chain Step State
+/// Corresponds to ChainStepState in protocol_state.proto
+public struct ChainStepState: Codable {
+    public var currentIndex: UInt32
+    public var chainKey: Data
+    public var dhPrivateKey: Data
+    public var dhPublicKey: Data
+    public var cachedMessageKeys: [CachedMessageKey]
+
+    public init(
+        currentIndex: UInt32,
+        chainKey: Data,
+        dhPrivateKey: Data,
+        dhPublicKey: Data,
+        cachedMessageKeys: [CachedMessageKey] = []
+    ) {
+        self.currentIndex = currentIndex
+        self.chainKey = chainKey
+        self.dhPrivateKey = dhPrivateKey
+        self.dhPublicKey = dhPublicKey
+        self.cachedMessageKeys = cachedMessageKeys
+    }
+}
+
+// MARK: - Cached Message Key
+/// Corresponds to CachedMessageKey in protocol_state.proto
+public struct CachedMessageKey: Codable {
+    public var index: UInt32
+    public var keyMaterial: Data
+
+    public init(index: UInt32, keyMaterial: Data) {
+        self.index = index
+        self.keyMaterial = keyMaterial
+    }
+}
+
+// MARK: - Identity Keys State
+/// Corresponds to IdentityKeysState in protocol_state.proto
+public struct IdentityKeysState: Codable {
+    public var ed25519SecretKey: Data
+    public var identityX25519SecretKey: Data
+    public var signedPreKeySecret: Data
+    public var oneTimePreKeys: [OneTimePreKeySecret]
+
+    public var ed25519PublicKey: Data
+    public var identityX25519PublicKey: Data
+    public var signedPreKeyId: UInt32
+    public var signedPreKeyPublic: Data
+    public var signedPreKeySignature: Data
+
+    public init(
+        ed25519SecretKey: Data,
+        identityX25519SecretKey: Data,
+        signedPreKeySecret: Data,
+        oneTimePreKeys: [OneTimePreKeySecret],
+        ed25519PublicKey: Data,
+        identityX25519PublicKey: Data,
+        signedPreKeyId: UInt32,
+        signedPreKeyPublic: Data,
+        signedPreKeySignature: Data
+    ) {
+        self.ed25519SecretKey = ed25519SecretKey
+        self.identityX25519SecretKey = identityX25519SecretKey
+        self.signedPreKeySecret = signedPreKeySecret
+        self.oneTimePreKeys = oneTimePreKeys
+        self.ed25519PublicKey = ed25519PublicKey
+        self.identityX25519PublicKey = identityX25519PublicKey
+        self.signedPreKeyId = signedPreKeyId
+        self.signedPreKeyPublic = signedPreKeyPublic
+        self.signedPreKeySignature = signedPreKeySignature
+    }
+}
+
+// MARK: - One Time Pre Key Secret
+/// Corresponds to OneTimePreKeySecret in protocol_state.proto
+public struct OneTimePreKeySecret: Codable {
+    public var preKeyId: UInt32
+    public var privateKey: Data
+    public var publicKey: Data
+
+    public init(preKeyId: UInt32, privateKey: Data, publicKey: Data) {
+        self.preKeyId = preKeyId
+        self.privateKey = privateKey
+        self.publicKey = publicKey
+    }
+}
+
+// MARK: - Public Key Bundle
+/// Corresponds to PublicKeyBundle in key_exchange.proto
+public struct PublicKeyBundle: Codable {
+    public var ed25519PublicKey: Data
+    public var identityX25519: Data
+    public var signedPreKeyId: UInt32
+    public var signedPreKeyPublic: Data
+    public var signedPreKeySignature: Data
+    public var oneTimePreKeys: [OneTimePreKeyRecord]
+    public var ephemeralX25519: Data?
+
+    public init(
+        ed25519PublicKey: Data,
+        identityX25519: Data,
+        signedPreKeyId: UInt32,
+        signedPreKeyPublic: Data,
+        signedPreKeySignature: Data,
+        oneTimePreKeys: [OneTimePreKeyRecord],
+        ephemeralX25519: Data?
+    ) {
+        self.ed25519PublicKey = ed25519PublicKey
+        self.identityX25519 = identityX25519
+        self.signedPreKeyId = signedPreKeyId
+        self.signedPreKeyPublic = signedPreKeyPublic
+        self.signedPreKeySignature = signedPreKeySignature
+        self.oneTimePreKeys = oneTimePreKeys
+        self.ephemeralX25519 = ephemeralX25519
+    }
+}
+
+// MARK: - One Time Pre Key Record
+/// Public record of a one-time pre-key
+public struct OneTimePreKeyRecord: Codable {
+    public var preKeyId: UInt32
+    public var publicKey: Data
+
+    public init(preKeyId: UInt32, publicKey: Data) {
+        self.preKeyId = preKeyId
+        self.publicKey = publicKey
+    }
+}
+
 // MARK: - Protocol Failure Types
 /// Failure types for protocol operations
 public enum ProtocolFailure: LocalizedError {
