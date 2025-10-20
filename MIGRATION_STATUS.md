@@ -4,8 +4,8 @@
 Step-by-step migration of Ecliptix desktop application (.NET/C#/Avalonia) to iOS (Swift/SwiftUI).
 
 **Started**: 2025-10-20
-**Status**: In Progress - Foundation Complete
-**Completion**: ~20% (Foundation + Cryptography)
+**Status**: In Progress - Protocol System
+**Completion**: ~25% (Foundation + Cryptography + Envelopes)
 
 ---
 
@@ -89,20 +89,76 @@ Step-by-step migration of Ecliptix desktop application (.NET/C#/Avalonia) to iOS
 - X25519 Keys: 32 bytes
 - Ed25519 Keys: 32 bytes (public), 64 bytes (secret)
 
----
-
-## 🚧 In Progress
-
 ### Phase 4: Protocol & Envelope System
-Currently analyzing and preparing to migrate:
+- [x] **Protocol Buffer Placeholder Types**
+  - SecureEnvelope
+  - EnvelopeMetadata
+  - EnvelopeError
+  - EnvelopeResultCode (32 error codes)
+  - EnvelopeType (5 types)
+  - ProtocolFailure errors
 
-- [ ] **EnvelopeBuilder** utilities
+- [x] **EnvelopeBuilder** utilities
   - CreateEnvelopeMetadata()
   - CreateSecureEnvelope()
   - EncryptMetadata() / DecryptMetadata()
   - ParseEnvelopeMetadata()
+  - ParseResultCode()
+  - ExtractRequestIdFromEnvelopeId()
+  - createRequestEnvelope() (extension)
+  - decryptResponseEnvelope() (extension)
+
+- [x] **Envelope Tests**
+  - 8 comprehensive test cases
+  - Encryption/decryption validation
+  - Wrong key detection
+  - Result code parsing
 
 **C# Source**: `Ecliptix.Protocol.System/Utilities/EnvelopeBuilder.cs`
+**Swift Target**: `Packages/EcliptixSecurity/Sources/Protocol/`
+
+**Commit**: `733a1f5` - EnvelopeBuilder and protocol envelope system
+
+#### Envelope System Details
+
+**Envelope Structure:**
+```swift
+SecureEnvelope {
+    metaData: Data              // Encrypted EnvelopeMetadata
+    encryptedPayload: Data      // Encrypted message payload
+    resultCode: Data            // 4-byte Int32 (little-endian)
+    authenticationTag: Data?    // Optional 16-byte tag
+    timestamp: Date             // Message timestamp
+    errorDetails: Data?         // Optional error information
+    headerNonce: Data           // 12-byte nonce for header encryption
+    dhPublicKey: Data?          // Optional 32-byte DH key for ratcheting
+}
+```
+
+**Result Codes (32 defined):**
+- Success: 0
+- Client Errors: 1-9 (bad request, unauthorized, forbidden, etc.)
+- Server Errors: 10-19 (internal error, unavailable, timeout, etc.)
+- Crypto Errors: 20-29 (crypto error, invalid signature, ratchet error, etc.)
+- Network Errors: 30-39 (network error, connection lost, timeout)
+
+**Metadata Encryption:**
+- AES-GCM with associated data (AEAD)
+- 32-byte key derived from root key via HKDF
+- 12-byte nonce (separate from payload nonce)
+- 16-byte authentication tag
+- Format: ciphertext + tag
+
+**Binary Compatibility:**
+- Same encryption format as C# implementation
+- Int32 little-endian for result codes
+- Compatible with desktop wire protocol
+
+---
+
+## 🚧 In Progress
+
+Currently working on: Ratcheting system and protocol state management
 
 ---
 
@@ -183,15 +239,15 @@ Currently analyzing and preparing to migrate:
 | Core Types | 7 | 7 | 0 | 0 |
 | Storage Layer | 3 | 3 | 0 | 0 |
 | Cryptography | 7 | 7 | 0 | 0 |
-| Protocol System | 4 | 0 | 1 | 3 |
+| Protocol System | 4 | 3 | 0 | 1 |
 | OPAQUE | 4 | 0 | 0 | 4 |
 | gRPC Layer | 7 | 0 | 0 | 7 |
 | Service Clients | 3 | 0 | 0 | 3 |
 | ViewModels | 4 | 0 | 0 | 4 |
 | UI Components | 10 | 5 | 0 | 5 |
-| **TOTAL** | **50** | **23** | **1** | **26** |
+| **TOTAL** | **50** | **26** | **0** | **24** |
 
-**Overall Progress**: ~46% of foundation components complete
+**Overall Progress**: ~52% of foundation components complete
 
 ---
 
@@ -304,8 +360,10 @@ Currently analyzing and preparing to migrate:
 | `f3440a6` | 2025-10-20 | Initial iOS project setup with Protocol Buffers |
 | `d0e1347` | 2025-10-20 | Migrate secure storage layer from C# to Swift |
 | `2141dad` | 2025-10-20 | Migrate cryptographic primitives from C# to Swift |
+| `3fa6627` | 2025-10-20 | Add comprehensive migration status tracking document |
+| `733a1f5` | 2025-10-20 | Migrate EnvelopeBuilder and protocol envelope system |
 
 ---
 
 **Last Updated**: 2025-10-20
-**Next Milestone**: Complete Protocol System & Envelope handling
+**Next Milestone**: Ratcheting system and protocol state management
