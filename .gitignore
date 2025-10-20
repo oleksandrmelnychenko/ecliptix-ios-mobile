@@ -36,8 +36,8 @@ playground.xcworkspace
 
 # Swift Package Manager
 #
-# Add this line if you want to avoid checking in source code from Swift Package Manager dependencies.
-Packages/
+# Note: We ARE checking in Packages/ because it contains our source modules, not dependencies
+# Package.pins and Package.resolved are ignored for dependency management
 Package.pins
 Package.resolved
 *.xcodeproj
