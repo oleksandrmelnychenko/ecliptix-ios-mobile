@@ -2,7 +2,7 @@
 
 **Migration Target:** Ecliptix Protocol from C#/.NET/Avalonia to Swift/iOS
 **Compatibility Goal:** Full binary protocol compatibility with C# desktop application
-**Current Progress:** ~85% Complete
+**Current Progress:** ~88% Complete
 
 ## Project Structure
 
@@ -79,11 +79,30 @@ ecliptix-ios/
   - Combine publisher for reactive updates
   - **Migrated from:** `Ecliptix.Core/Services/Network/NetworkConnectivity.cs`
 
-- ✅ **Retry Policy** (165 lines)
-  - Exponential backoff with jitter
-  - Configurable max attempts and delays
-  - Per-operation retry tracking
-  - **Migrated from:** C# Polly library patterns
+- ✅ **RetryStrategy** (400 lines) **ENHANCED!**
+  - Comprehensive retry with operation tracking
+  - Global exhaustion detection (prevents retry storms)
+  - Manual retry support via clearExhaustedOperations()
+  - Decorrelated jitter backoff with retry delay caching
+  - Timeout management per retry attempt
+  - Cleanup timer for abandoned operations (5-minute intervals)
+  - Per-connection health tracking
+  - **Migrated from:** `Ecliptix.Core/Services/Network/Resilience/RetryStrategy.cs` (874 lines)
+
+- ✅ **RetryConfiguration** (90 lines) **NEW!**
+  - Configuration struct for retry behavior
+  - Presets: default, aggressive, conservative, none
+  - Controls max retries, delays, timeouts, jitter
+  - **Migrated from:** C# RetryConfiguration.cs
+
+- ✅ **PendingRequestManager** (213 lines) **NEW!**
+  - Manages requests that failed during network outages
+  - Registration and removal of pending requests
+  - Retry-all functionality for outage recovery
+  - Combine publisher for UI integration (pendingCountPublisher)
+  - Cleanup of old requests (configurable timeout)
+  - Thread-safe with NSLock
+  - **Migrated from:** `Ecliptix.Core/Services/Network/Infrastructure/PendingRequestManager.cs`
 
 - ✅ **gRPC Channel Management** (140 lines)
   - Channel lifecycle (create, reuse, shutdown)
@@ -96,12 +115,17 @@ ecliptix-ios/
   - User-facing error messages
   - Retry/non-retry categorization
 
-- ✅ **NetworkProvider** (485 lines) **NEW!**
+- ✅ **NetworkProvider** (680+ lines) **ENHANCED!**
   - Central orchestrator for all encrypted network operations
   - Request encryption/decryption orchestration
   - Integration with DoubleRatchet protocol
   - Request deduplication (prevents duplicate concurrent operations)
-  - Network outage recovery with request queueing
+  - Network outage recovery with automatic pending request retry
+  - Integrated RetryStrategy for comprehensive retry logic
+  - Integrated PendingRequestManager for outage recovery
+  - executeWithRetry() method with automatic retry
+  - Manual retry support (clearExhaustedOperations, markConnectionHealthy)
+  - Observable pending request count for UI
   - Secure channel establishment (X3DH + DoubleRatchet initialization)
   - Connection lifecycle management
   - **Migrated from:** `Ecliptix.Core/Infrastructure/Network/Core/Providers/NetworkProvider.cs` (2293 lines)
@@ -291,11 +315,12 @@ All proto files are present and ready for generation:
 |-----------|----------------|-------------------|------------|
 | Double Ratchet | 636 | 1134 | 100% |
 | Identity Keys | 636 | 1053 | 100% |
+| Network Resilience | 703 (RetryStrategy + RetryConfig + PendingRequestManager) | ~1200 (RetryStrategy.cs + PendingRequestManager.cs) | 100% |
 | Network Layer | 575 | ~800 | 100% |
-| NetworkProvider | 705 (NetworkProvider + ProtocolConnectionManager) | 2293 | 100% |
+| NetworkProvider | 900 (NetworkProvider + ProtocolConnectionManager) | 2293 | 100% |
 | Service Clients | 430 | ~600 | 90% (awaiting protobuf) |
 | ViewModels | 800 | ~900 | 100% |
-| **Total** | **3782** | **~6780** | **~85%** |
+| **Total** | **4680** | **~7980** | **~88%** |
 
 ## 🔑 Key Technical Decisions
 
@@ -363,6 +388,7 @@ All migration work is committed to this branch. Commits follow conventional comm
 
 ---
 
-**Last Updated:** 2025-10-21
+**Last Updated:** 2025-10-21 (Session 2: Retry Strategy & Network Resilience)
 **Migration Lead:** Claude Code
 **Repository:** ecliptix-ios
+**Session:** Continuation - Enhanced retry strategy and outage recovery integration
