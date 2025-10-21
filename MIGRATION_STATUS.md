@@ -2,7 +2,7 @@
 
 **Migration Target:** Ecliptix Protocol from C#/.NET/Avalonia to Swift/iOS
 **Compatibility Goal:** Full binary protocol compatibility with C# desktop application
-**Current Progress:** ~88% Complete
+**Current Progress:** ~90% Complete
 
 ## Project Structure
 
@@ -104,6 +104,29 @@ ecliptix-ios/
   - Thread-safe with NSLock
   - **Migrated from:** `Ecliptix.Core/Services/Network/Infrastructure/PendingRequestManager.cs`
 
+- ✅ **CircuitBreaker** (470+ lines) **NEW!**
+  - Implements circuit breaker pattern for failure protection
+  - Three states: Closed (normal), Open (fail-fast), Half-Open (testing recovery)
+  - Global and per-connection circuit breakers
+  - Configurable failure/success thresholds
+  - Automatic state transitions based on failure patterns
+  - Manual control: trip(), reset(), resetConnection()
+  - Metrics tracking with detailed statistics
+  - Configuration presets: default, aggressive, conservative, disabled
+  - **Migrated from:** `Ecliptix.Core/Services/Network/Resilience/CircuitBreaker.cs`
+
+- ✅ **ConnectionHealthMonitor** (360+ lines) **NEW!**
+  - Real-time health status tracking per connection
+  - Health states: healthy, degraded, unhealthy, critical
+  - Metrics: success rate, average latency, failure counts
+  - Consecutive failure tracking for degradation detection
+  - Latency sampling with rolling window (100 samples)
+  - Health status transitions via Combine publisher
+  - Automatic cleanup of stale connections (configurable timeout)
+  - Overall health statistics across all connections
+  - Configurable thresholds for each health status level
+  - **Migrated from:** `Ecliptix.Core/Services/Network/Health/ConnectionHealthMonitor.cs`
+
 - ✅ **gRPC Channel Management** (140 lines)
   - Channel lifecycle (create, reuse, shutdown)
   - Connection pooling
@@ -115,7 +138,7 @@ ecliptix-ios/
   - User-facing error messages
   - Retry/non-retry categorization
 
-- ✅ **NetworkProvider** (680+ lines) **ENHANCED!**
+- ✅ **NetworkProvider** (850+ lines) **FULLY INTEGRATED!**
   - Central orchestrator for all encrypted network operations
   - Request encryption/decryption orchestration
   - Integration with DoubleRatchet protocol
@@ -123,8 +146,18 @@ ecliptix-ios/
   - Network outage recovery with automatic pending request retry
   - Integrated RetryStrategy for comprehensive retry logic
   - Integrated PendingRequestManager for outage recovery
+  - Integrated CircuitBreaker for automatic failure protection
+  - Integrated ConnectionHealthMonitor for real-time health tracking
+  - All requests wrapped with circuit breaker protection
+  - Latency and health metrics recorded for every request
+  - Health-based circuit breaker triggering
+  - Auto-reset circuits when connections become healthy
   - executeWithRetry() method with automatic retry
-  - Manual retry support (clearExhaustedOperations, markConnectionHealthy)
+  - Manual control API:
+    - clearExhaustedOperations(), markConnectionHealthy()
+    - tripCircuitBreaker(), resetCircuitBreaker()
+    - getCircuitBreakerMetrics(), getConnectionHealth()
+    - healthStatusPublisher for reactive UI updates
   - Observable pending request count for UI
   - Secure channel establishment (X3DH + DoubleRatchet initialization)
   - Connection lifecycle management
@@ -315,12 +348,12 @@ All proto files are present and ready for generation:
 |-----------|----------------|-------------------|------------|
 | Double Ratchet | 636 | 1134 | 100% |
 | Identity Keys | 636 | 1053 | 100% |
-| Network Resilience | 703 (RetryStrategy + RetryConfig + PendingRequestManager) | ~1200 (RetryStrategy.cs + PendingRequestManager.cs) | 100% |
+| Network Resilience | 1533 (RetryStrategy + RetryConfig + PendingRequestManager + CircuitBreaker + HealthMonitor) | ~2000 (all resilience components) | 100% |
 | Network Layer | 575 | ~800 | 100% |
-| NetworkProvider | 900 (NetworkProvider + ProtocolConnectionManager) | 2293 | 100% |
+| NetworkProvider | 1070 (NetworkProvider + ProtocolConnectionManager) | 2293 | 100% |
 | Service Clients | 430 | ~600 | 90% (awaiting protobuf) |
 | ViewModels | 800 | ~900 | 100% |
-| **Total** | **4680** | **~7980** | **~88%** |
+| **Total** | **5680** | **~8780** | **~90%** |
 
 ## 🔑 Key Technical Decisions
 
@@ -388,7 +421,8 @@ All migration work is committed to this branch. Commits follow conventional comm
 
 ---
 
-**Last Updated:** 2025-10-21 (Session 2: Retry Strategy & Network Resilience)
+**Last Updated:** 2025-10-21 (Session 2: Network Resilience Layer Complete)
 **Migration Lead:** Claude Code
 **Repository:** ecliptix-ios
-**Session:** Continuation - Enhanced retry strategy and outage recovery integration
+**Session:** Continuation - Complete resilience layer with retry, circuit breaker, and health monitoring
+**Progress:** 88% → 90% (resilience layer complete)
