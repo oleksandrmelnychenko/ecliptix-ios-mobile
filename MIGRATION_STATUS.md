@@ -256,21 +256,49 @@ RatchetConfig {
 ## 📋 Pending Migrations
 
 ### Phase 6: Identity Keys & X3DH
-- [ ] **EcliptixSystemIdentityKeys** - Identity key management (1053 lines C#)
-  - Ed25519 signing keys
-  - X25519 identity keys
-  - Signed pre-keys with signatures
-  - One-time pre-keys
-  - X3DH key agreement
-  - Master key derivation
-  - State serialization
+- [x] **IdentityKeys** - Complete identity key management (636 lines Swift)
+  - Ed25519 signing keys (Curve25519.Signing)
+  - X25519 identity keys (Curve25519.KeyAgreement)
+  - Signed pre-keys with Ed25519 signatures
+  - One-time pre-key generation and management (100 keys default)
+  - X3DH key agreement (initiator side)
+  - X3DH key agreement (recipient side)
+  - Master key derivation via HKDF
+  - State serialization (toProtoState/fromProtoState)
+  - Ephemeral key pair generation
+  - Public bundle creation
+  - Signature verification
 
-**C# Sources**:
-- `Ecliptix.Protocol.System/Core/EcliptixProtocolConnection.cs`
-- `Ecliptix.Protocol.System/Core/EcliptixProtocolChainStep.cs`
-- `Ecliptix.Core/Infrastructure/Security/Storage/SecureProtocolStateStorage.cs`
+**C# Source**: `Ecliptix.Protocol.System/Core/EcliptixSystemIdentityKeys.cs` (1053 lines)
+**Swift Target**: `Packages/EcliptixSecurity/Sources/Crypto/IdentityKeys.swift`
 
-### Phase 6: OPAQUE Protocol
+**Commit**: TBD - Complete X3DH identity key system
+
+#### X3DH Key Agreement Details
+
+**Extended Triple Diffie-Hellman (X3DH):**
+- DH1 = DH(IKa, SPKb) - Identity to Signed Pre-Key
+- DH2 = DH(EKa, IKb) - Ephemeral to Identity
+- DH3 = DH(EKa, SPKb) - Ephemeral to Signed Pre-Key
+- DH4 = DH(EKa, OPKb) - Ephemeral to One-Time Pre-Key (optional)
+
+**Key Material:**
+- Shared Secret = HKDF(0xFF || DH1 || DH2 || DH3 || [DH4])
+- Ed25519 signatures prevent MITM attacks
+- One-time pre-keys provide forward secrecy
+
+**Features:**
+1. **Initiator**: Uses ephemeral key to derive shared secret
+2. **Recipient**: Uses signed pre-key and optional OPK
+3. **Verification**: Ed25519 signature on signed pre-key
+4. **Master Key Support**: Deterministic key derivation from master key
+5. **State Persistence**: Full serialization support
+
+---
+
+## 📋 Pending Migrations
+
+### Phase 7: OPAQUE Protocol
 - [ ] **OpaqueClient** - OPAQUE registration and authentication
 - [ ] **OpaqueRegistration** flow
 - [ ] **OpaqueAuthentication** flow
@@ -337,15 +365,15 @@ RatchetConfig {
 | Envelope System | 3 | 3 | 0 | 0 |
 | Ratcheting System | 5 | 5 | 0 | 0 |
 | Protocol Connection | 4 | 4 | 0 | 0 |
-| Identity Keys | 1 | 0 | 0 | 1 |
+| Identity Keys | 1 | 1 | 0 | 0 |
 | OPAQUE | 4 | 0 | 0 | 4 |
 | gRPC Layer | 7 | 0 | 0 | 7 |
 | Service Clients | 3 | 0 | 0 | 3 |
 | ViewModels | 4 | 0 | 0 | 4 |
 | UI Components | 10 | 5 | 0 | 5 |
-| **TOTAL** | **59** | **35** | **0** | **24** |
+| **TOTAL** | **59** | **36** | **0** | **23** |
 
-**Overall Progress**: ~59% of all components, ~70% including full Double Ratchet protocol
+**Overall Progress**: ~61% of all components, ~72% with full protocol + identity keys
 
 ---
 
@@ -380,20 +408,13 @@ RatchetConfig {
 
 ## 🎯 Next Steps (Priority Order)
 
-1. **Identity Keys & X3DH** (Current Priority)
-   - Ed25519 signing keys
-   - X25519 identity keys
-   - Signed pre-keys with Ed25519 signatures
-   - One-time pre-key management
-   - X3DH key agreement protocol
-   - Master key derivation
-   - State serialization
+1. **OPAQUE Protocol** (Current Priority)
+   - Most complex remaining cryptographic component
+   - Critical for password-authenticated key exchange
+   - Registration and authentication flows
+   - Envelope handling
 
-2. **OPAQUE Protocol**
-   - Most complex cryptographic component
-   - Critical for authentication
-
-3. **gRPC Service Clients**
+2. **gRPC Service Clients**
    - Network communication
    - Service implementations
 
