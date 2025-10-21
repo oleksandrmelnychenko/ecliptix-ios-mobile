@@ -460,9 +460,12 @@ public final class NetworkProvider {
         }
 
         // Initialize Double Ratchet as initiator
-        let ratchetResult = DoubleRatchet.initializeAsInitiator(
-            sharedSecret: sharedSecret,
-            remotePublicKey: remotePublicKeyBundle.identityKey
+        // Note: ProtocolConnection needs finalization after creation
+        let ratchetResult = ProtocolConnection.create(
+            connectionId: connectId,
+            isInitiator: true,
+            initialRootKey: sharedSecret,
+            initialChainKey: sharedSecret
         )
 
         guard case .success(let doubleRatchet) = ratchetResult else {

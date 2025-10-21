@@ -335,6 +335,8 @@ public enum ProtocolFailure: LocalizedError {
     case bufferTooSmall(String)
     case generic(String)
     case prepareLocal(String)
+    case connectionNotFound(String)
+    case noDoubleRatchet(String)
 
     public var errorDescription: String? {
         switch self {
@@ -348,6 +350,14 @@ public enum ProtocolFailure: LocalizedError {
             return "Protocol error: \(message)"
         case .prepareLocal(let message):
             return "Local preparation failed: \(message)"
+        case .connectionNotFound(let message):
+            return "Connection not found: \(message)"
+        case .noDoubleRatchet(let message):
+            return "Double Ratchet not initialized: \(message)"
         }
+    }
+
+    public var message: String {
+        return errorDescription ?? "Unknown protocol error"
     }
 }
