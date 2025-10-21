@@ -4,8 +4,8 @@
 Step-by-step migration of Ecliptix desktop application (.NET/C#/Avalonia) to iOS (Swift/SwiftUI).
 
 **Started**: 2025-10-20
-**Status**: In Progress - Protocol System
-**Completion**: ~70% (Foundation + Cryptography + Envelopes + Full Protocol)
+**Status**: In Progress - Identity Keys Complete
+**Completion**: ~72% (Foundation + Cryptography + Protocol + Identity Keys)
 
 ---
 
