@@ -2,7 +2,7 @@
 
 **Migration Target:** Ecliptix Protocol from C#/.NET/Avalonia to Swift/iOS
 **Compatibility Goal:** Full binary protocol compatibility with C# desktop application
-**Current Progress:** ~90% Complete
+**Current Progress:** ~92% Complete
 
 ## Project Structure
 
@@ -126,6 +126,29 @@ ecliptix-ios/
   - Overall health statistics across all connections
   - Configurable thresholds for each health status level
   - **Migrated from:** `Ecliptix.Core/Services/Network/Health/ConnectionHealthMonitor.cs`
+
+- ✅ **NetworkCache** (340+ lines) **NEW!**
+  - In-memory caching for network responses
+  - Cache policies: networkOnly, cacheFirst, networkFirst, cacheOnly
+  - TTL (time-to-live) with automatic expiration
+  - Size limits (max entries and max entry size)
+  - Cache statistics (hits, misses, evictions, hit rate)
+  - Automatic cleanup of expired entries
+  - Pattern-based invalidation
+  - ETag support for conditional requests
+  - Configuration presets: default, aggressive, conservative, disabled
+  - **Migrated from:** `Ecliptix.Core/Services/Network/Caching/NetworkCache.cs`
+
+- ✅ **RequestTimeoutManager** (280+ lines) **NEW!**
+  - Per-request timeout tracking
+  - Configurable timeout duration per request
+  - Timeout extension for long-running operations
+  - Automatic timeout detection with callbacks
+  - Batch cancellation of active timeouts
+  - Timeout statistics (active, total, timeout rate)
+  - Helper method execute() with automatic timeout
+  - Configuration presets: default, short, long, disabled
+  - **Migrated from:** `Ecliptix.Core/Services/Network/Infrastructure/RequestTimeoutManager.cs`
 
 - ✅ **gRPC Channel Management** (140 lines)
   - Channel lifecycle (create, reuse, shutdown)
@@ -348,12 +371,13 @@ All proto files are present and ready for generation:
 |-----------|----------------|-------------------|------------|
 | Double Ratchet | 636 | 1134 | 100% |
 | Identity Keys | 636 | 1053 | 100% |
-| Network Resilience | 1533 (RetryStrategy + RetryConfig + PendingRequestManager + CircuitBreaker + HealthMonitor) | ~2000 (all resilience components) | 100% |
-| Network Layer | 575 | ~800 | 100% |
+| Network Resilience | 1533 (Retry + PendingRequest + CircuitBreaker + HealthMonitor) | ~2000 | 100% |
+| Network Infrastructure | 620 (NetworkCache + TimeoutManager) | ~750 | 100% |
+| Network Layer | 575 (Connectivity + Failures) | ~800 | 100% |
 | NetworkProvider | 1070 (NetworkProvider + ProtocolConnectionManager) | 2293 | 100% |
 | Service Clients | 430 | ~600 | 90% (awaiting protobuf) |
 | ViewModels | 800 | ~900 | 100% |
-| **Total** | **5680** | **~8780** | **~90%** |
+| **Total** | **6300** | **~9530** | **~92%** |
 
 ## 🔑 Key Technical Decisions
 
@@ -421,8 +445,8 @@ All migration work is committed to this branch. Commits follow conventional comm
 
 ---
 
-**Last Updated:** 2025-10-21 (Session 2: Network Resilience Layer Complete)
+**Last Updated:** 2025-10-21 (Session 2: Network Infrastructure Complete)
 **Migration Lead:** Claude Code
 **Repository:** ecliptix-ios
-**Session:** Continuation - Complete resilience layer with retry, circuit breaker, and health monitoring
-**Progress:** 88% → 90% (resilience layer complete)
+**Session:** Continuation - Complete network infrastructure with resilience, caching, and timeout management
+**Progress:** 88% → 92% (network layer complete)
