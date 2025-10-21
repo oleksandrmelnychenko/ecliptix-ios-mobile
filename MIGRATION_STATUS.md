@@ -2,7 +2,7 @@
 
 **Migration Target:** Ecliptix Protocol from C#/.NET/Avalonia to Swift/iOS
 **Compatibility Goal:** Full binary protocol compatibility with C# desktop application
-**Current Progress:** ~75% Complete
+**Current Progress:** ~85% Complete
 
 ## Project Structure
 
@@ -95,6 +95,23 @@ ecliptix-ios/
   - Comprehensive error classification
   - User-facing error messages
   - Retry/non-retry categorization
+
+- ✅ **NetworkProvider** (485 lines) **NEW!**
+  - Central orchestrator for all encrypted network operations
+  - Request encryption/decryption orchestration
+  - Integration with DoubleRatchet protocol
+  - Request deduplication (prevents duplicate concurrent operations)
+  - Network outage recovery with request queueing
+  - Secure channel establishment (X3DH + DoubleRatchet initialization)
+  - Connection lifecycle management
+  - **Migrated from:** `Ecliptix.Core/Infrastructure/Network/Core/Providers/NetworkProvider.cs` (2293 lines)
+
+- ✅ **ProtocolConnectionManager** (220 lines) **NEW!**
+  - Manages protocol sessions by connection ID
+  - Thread-safe connection dictionary
+  - Encrypts plain data → SecureEnvelope
+  - Decrypts SecureEnvelope → plain data
+  - Integration point between network and protocol layers
 
 ### 4. Service Clients (EcliptixNetworking/Services)
 - ✅ **BaseRPCService** (135 lines)
@@ -275,9 +292,10 @@ All proto files are present and ready for generation:
 | Double Ratchet | 636 | 1134 | 100% |
 | Identity Keys | 636 | 1053 | 100% |
 | Network Layer | 575 | ~800 | 100% |
+| NetworkProvider | 705 (NetworkProvider + ProtocolConnectionManager) | 2293 | 100% |
 | Service Clients | 430 | ~600 | 90% (awaiting protobuf) |
 | ViewModels | 800 | ~900 | 100% |
-| **Total** | **3077** | **~4487** | **~75%** |
+| **Total** | **3782** | **~6780** | **~85%** |
 
 ## 🔑 Key Technical Decisions
 
