@@ -23,6 +23,8 @@ public final class NetworkProvider {
     private let retryStrategy: RetryStrategy
     private let pendingRequestManager: PendingRequestManager
     private let connectivityMonitor: NetworkConnectivityMonitor
+    private let circuitBreaker: CircuitBreaker
+    private let healthMonitor: ConnectionHealthMonitor
 
     /// Active requests for deduplication (request key -> cancellation handle)
     private var activeRequests: [String: Task<Void, Never>] = [:]
@@ -80,12 +82,16 @@ public final class NetworkProvider {
         connectionManager: ProtocolConnectionManager = ProtocolConnectionManager(),
         channelManager: GRPCChannelManager,
         retryConfiguration: RetryConfiguration = .default,
+        circuitBreakerConfiguration: CircuitBreakerConfiguration = .default,
+        healthMonitorConfiguration: HealthMonitorConfiguration = .default,
         connectivityMonitor: NetworkConnectivityMonitor = NetworkConnectivityMonitor()
     ) {
         self.connectionManager = connectionManager
         self.channelManager = channelManager
         self.retryStrategy = RetryStrategy(configuration: retryConfiguration)
         self.pendingRequestManager = PendingRequestManager()
+        self.circuitBreaker = CircuitBreaker(configuration: circuitBreakerConfiguration)
+        self.healthMonitor = ConnectionHealthMonitor(configuration: healthMonitorConfiguration)
         self.connectivityMonitor = connectivityMonitor
 
         // Start monitoring network connectivity
@@ -95,9 +101,30 @@ public final class NetworkProvider {
         Task {
             await self.subscribeToNetworkChanges()
         }
+
+        // Subscribe to health status changes
+        Task {
+            await self.subscribeToHealthChanges()
+        }
     }
 
     // MARK: - Network Connectivity
+
+    /// Subscribes to health status changes
+    private func subscribeToHealthChanges() async {
+        for await health in healthMonitor.healthStatusPublisher.values {
+            // React to health changes
+            if health.status == .critical {
+                // Trip circuit breaker for critical connections
+                Log.warning("[NetworkProvider] ⚠️ Connection \(health.connectId) is critical - considering circuit breaker")
+            } else if health.status == .healthy {
+                // Reset circuit breaker when connection becomes healthy
+                circuitBreaker.resetConnection(health.connectId)
+                retryStrategy.markConnectionHealthy(connectId: health.connectId)
+                Log.info("[NetworkProvider] ✅ Connection \(health.connectId) is healthy - reset circuit")
+            }
+        }
+    }
 
     /// Subscribes to network status changes for outage recovery
     private func subscribeToNetworkChanges() async {
@@ -354,6 +381,9 @@ public final class NetworkProvider {
         onCompleted: @escaping (Data) async throws -> Void
     ) async -> Result<Void, NetworkFailure> {
 
+        // Track request start time for latency measurement
+        let requestStartTime = Date()
+
         // Track active request
         let requestTask = Task { }
         if !shouldAllowDuplicates {
@@ -370,6 +400,41 @@ public final class NetworkProvider {
                 activeRequestsLock.unlock()
             }
         }
+
+        // Execute with circuit breaker protection
+        let circuitResult = await circuitBreaker.execute(
+            connectId: connectId,
+            operationName: serviceType.rawValue
+        ) {
+            await self.executeRequestWithProtocol(
+                connectId: connectId,
+                serviceType: serviceType,
+                plainBuffer: plainBuffer,
+                waitForRecovery: waitForRecovery,
+                onCompleted: onCompleted
+            )
+        }
+
+        // Record health metrics
+        let latency = Date().timeIntervalSince(requestStartTime)
+        switch circuitResult {
+        case .success:
+            healthMonitor.recordSuccess(connectId: connectId, latency: latency)
+        case .failure(let error):
+            healthMonitor.recordFailure(connectId: connectId, error: error)
+        }
+
+        return circuitResult
+    }
+
+    /// Executes request with protocol encryption (called by circuit breaker)
+    private func executeRequestWithProtocol(
+        connectId: UInt32,
+        serviceType: RPCServiceType,
+        plainBuffer: Data,
+        waitForRecovery: Bool,
+        onCompleted: @escaping (Data) async throws -> Void
+    ) async -> Result<Void, NetworkFailure> {
 
         // Wait for outage recovery if needed
         if waitForRecovery {
@@ -664,6 +729,64 @@ public final class NetworkProvider {
     /// Publisher for observing pending request count changes
     public var pendingCountPublisher: PassthroughSubject<Int, Never> {
         return pendingRequestManager.pendingCountPublisher
+    }
+
+    // MARK: - Circuit Breaker & Health
+
+    /// Manually trips the circuit breaker (opens circuit)
+    /// Migrated from: TripCircuitBreaker()
+    public func tripCircuitBreaker() {
+        circuitBreaker.trip()
+        Log.warning("[NetworkProvider] ⚠️ Circuit breaker manually tripped")
+    }
+
+    /// Manually resets the circuit breaker (closes circuit)
+    /// Migrated from: ResetCircuitBreaker()
+    public func resetCircuitBreaker() {
+        circuitBreaker.reset()
+        Log.info("[NetworkProvider] 🔄 Circuit breaker manually reset")
+    }
+
+    /// Resets circuit breaker for a specific connection
+    public func resetCircuitBreakerForConnection(_ connectId: UInt32) {
+        circuitBreaker.resetConnection(connectId)
+        Log.info("[NetworkProvider] 🔄 Circuit breaker reset for connection \(connectId)")
+    }
+
+    /// Gets circuit breaker metrics
+    public func getCircuitBreakerMetrics() -> CircuitBreakerMetrics {
+        return circuitBreaker.getMetrics()
+    }
+
+    /// Gets circuit breaker metrics for a specific connection
+    public func getConnectionCircuitMetrics(connectId: UInt32) -> ConnectionCircuitMetrics? {
+        return circuitBreaker.getConnectionMetrics(connectId: connectId)
+    }
+
+    /// Gets health status for a connection
+    /// Migrated from: GetConnectionHealth()
+    public func getConnectionHealth(connectId: UInt32) -> ConnectionHealthMonitor.ConnectionHealth? {
+        return healthMonitor.getHealth(connectId: connectId)
+    }
+
+    /// Gets health status for all connections
+    public func getAllConnectionHealth() -> [ConnectionHealthMonitor.ConnectionHealth] {
+        return healthMonitor.getAllHealth()
+    }
+
+    /// Gets overall health statistics
+    public func getHealthStatistics() -> HealthStatistics {
+        return healthMonitor.getStatistics()
+    }
+
+    /// Resets health tracking for a connection
+    public func resetConnectionHealth(connectId: UInt32) {
+        healthMonitor.resetHealth(connectId: connectId)
+    }
+
+    /// Publisher for health status changes
+    public var healthStatusPublisher: PassthroughSubject<ConnectionHealthMonitor.ConnectionHealth, Never> {
+        return healthMonitor.healthStatusPublisher
     }
 
     // MARK: - Shutdown
