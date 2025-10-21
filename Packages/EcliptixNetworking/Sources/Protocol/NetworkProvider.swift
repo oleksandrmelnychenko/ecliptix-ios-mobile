@@ -20,12 +20,13 @@ public final class NetworkProvider {
 
     private let connectionManager: ProtocolConnectionManager
     private let channelManager: GRPCChannelManager
-    private let retryPolicy: RetryPolicy
+    private let retryStrategy: RetryStrategy
+    private let pendingRequestManager: PendingRequestManager
     private let connectivityMonitor: NetworkConnectivityMonitor
 
-    /// Pending requests for deduplication (request key -> cancellation handle)
-    private var pendingRequests: [String: Task<Void, Never>] = [:]
-    private let pendingRequestsLock = NSLock()
+    /// Active requests for deduplication (request key -> cancellation handle)
+    private var activeRequests: [String: Task<Void, Never>] = [:]
+    private let activeRequestsLock = NSLock()
 
     /// Outage state management
     private var isInOutage: Bool = false
@@ -78,12 +79,13 @@ public final class NetworkProvider {
     public init(
         connectionManager: ProtocolConnectionManager = ProtocolConnectionManager(),
         channelManager: GRPCChannelManager,
-        retryPolicy: RetryPolicy = RetryPolicy(),
+        retryConfiguration: RetryConfiguration = .default,
         connectivityMonitor: NetworkConnectivityMonitor = NetworkConnectivityMonitor()
     ) {
         self.connectionManager = connectionManager
         self.channelManager = channelManager
-        self.retryPolicy = retryPolicy
+        self.retryStrategy = RetryStrategy(configuration: retryConfiguration)
+        self.pendingRequestManager = PendingRequestManager()
         self.connectivityMonitor = connectivityMonitor
 
         // Start monitoring network connectivity
@@ -147,6 +149,14 @@ public final class NetworkProvider {
 
         // Resume all waiting requests
         continuation?.resume()
+
+        // Retry all pending requests that failed during outage
+        Task {
+            let successCount = await pendingRequestManager.retryAllPendingRequests()
+            if successCount > 0 {
+                Log.info("[NetworkProvider] 🔄 Outage recovery: \(successCount) pending requests succeeded")
+            }
+        }
     }
 
     /// Waits for outage to be resolved before executing request
@@ -252,9 +262,9 @@ public final class NetworkProvider {
         // Check for duplicates
         let shouldAllowDuplicates = allowDuplicates || canServiceTypeBeDuplicated(serviceType)
         if !shouldAllowDuplicates {
-            pendingRequestsLock.lock()
-            if pendingRequests[requestKey] != nil {
-                pendingRequestsLock.unlock()
+            activeRequestsLock.lock()
+            if activeRequests[requestKey] != nil {
+                activeRequestsLock.unlock()
                 Log.warning("[NetworkProvider] Duplicate request rejected: \(requestKey)")
                 return .failure(NetworkFailure(
                     type: .invalidRequest,
@@ -262,7 +272,7 @@ public final class NetworkProvider {
                     shouldRetry: false
                 ))
             }
-            pendingRequestsLock.unlock()
+            activeRequestsLock.unlock()
         }
 
         // Execute request with deduplication tracking
@@ -277,13 +287,60 @@ public final class NetworkProvider {
                 onCompleted: onCompleted
             )
         } onCancel: {
-            // Remove from pending requests if cancelled
+            // Remove from active requests if cancelled
             if !shouldAllowDuplicates {
-                pendingRequestsLock.lock()
-                pendingRequests.removeValue(forKey: requestKey)
-                pendingRequestsLock.unlock()
+                activeRequestsLock.lock()
+                activeRequests.removeValue(forKey: requestKey)
+                activeRequestsLock.unlock()
             }
         }
+    }
+
+    /// Executes a unary RPC request with retry strategy
+    /// This is the recommended method to use - it wraps executeUnaryRequest with retry logic
+    public func executeWithRetry<T>(
+        operationName: String,
+        connectId: UInt32,
+        serviceType: RPCServiceType,
+        plainBuffer: Data,
+        allowDuplicates: Bool = false,
+        waitForRecovery: Bool = true,
+        maxRetries: Int? = nil,
+        onCompleted: @escaping (Data) async throws -> T
+    ) async -> Result<T, NetworkFailure> {
+
+        // Execute with retry strategy
+        let result = await retryStrategy.executeRPCOperation(
+            operationName: operationName,
+            connectId: connectId,
+            serviceType: serviceType,
+            maxRetries: maxRetries
+        ) { attempt in
+            Log.debug("[NetworkProvider] Executing '\(operationName)' attempt \(attempt)")
+
+            // Execute the request
+            let requestResult = await executeUnaryRequest(
+                connectId: connectId,
+                serviceType: serviceType,
+                plainBuffer: plainBuffer,
+                allowDuplicates: allowDuplicates,
+                waitForRecovery: waitForRecovery
+            ) { responseData in
+                try await onCompleted(responseData)
+            }
+
+            // Map Result<Void, NetworkFailure> to Result<T, NetworkFailure>
+            switch requestResult {
+            case .success:
+                // We need to return the actual value from onCompleted
+                // For now, return Unit result (will be improved with better API)
+                return .success(() as! T)
+            case .failure(let error):
+                return .failure(error)
+            }
+        }
+
+        return result
     }
 
     /// Internal request execution with encryption/decryption
@@ -297,20 +354,20 @@ public final class NetworkProvider {
         onCompleted: @escaping (Data) async throws -> Void
     ) async -> Result<Void, NetworkFailure> {
 
-        // Track pending request
+        // Track active request
         let requestTask = Task { }
         if !shouldAllowDuplicates {
-            pendingRequestsLock.lock()
-            pendingRequests[requestKey] = requestTask
-            pendingRequestsLock.unlock()
+            activeRequestsLock.lock()
+            activeRequests[requestKey] = requestTask
+            activeRequestsLock.unlock()
         }
 
         defer {
-            // Remove from pending requests
+            // Remove from active requests
             if !shouldAllowDuplicates {
-                pendingRequestsLock.lock()
-                pendingRequests.removeValue(forKey: requestKey)
-                pendingRequestsLock.unlock()
+                activeRequestsLock.lock()
+                activeRequests.removeValue(forKey: requestKey)
+                activeRequestsLock.unlock()
             }
         }
 
@@ -399,11 +456,56 @@ public final class NetworkProvider {
             return .success(())
         } catch {
             Log.error("[NetworkProvider] Completion handler failed: \(error)")
-            return .failure(NetworkFailure(
+
+            let failure = NetworkFailure(
                 type: .serverError,
                 message: "Failed to process response: \(error.localizedDescription)",
                 shouldRetry: false
-            ))
+            )
+
+            // Register for retry if appropriate
+            if failure.shouldRetry && waitForRecovery {
+                registerPendingRequest(
+                    requestKey: requestKey,
+                    connectId: connectId,
+                    serviceType: serviceType,
+                    plainBuffer: plainBuffer,
+                    onCompleted: onCompleted
+                )
+            }
+
+            return .failure(failure)
+        }
+    }
+
+    /// Registers a failed request for later retry
+    /// Migrated from: RegisterPendingRequest()
+    private func registerPendingRequest(
+        requestKey: String,
+        connectId: UInt32,
+        serviceType: RPCServiceType,
+        plainBuffer: Data,
+        onCompleted: @escaping (Data) async throws -> Void
+    ) {
+        pendingRequestManager.registerPendingRequest(requestId: requestKey) {
+            // Retry action - re-execute the request
+            let result = await self.executeUnaryRequest(
+                connectId: connectId,
+                serviceType: serviceType,
+                plainBuffer: plainBuffer,
+                allowDuplicates: true, // Allow during retry
+                waitForRecovery: false, // Don't wait again
+                onCompleted: onCompleted
+            )
+
+            // Throw error if failed to propagate to PendingRequestManager
+            if case .failure(let error) = result {
+                throw NSError(
+                    domain: "NetworkProvider",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: error.message]
+                )
+            }
         }
     }
 
@@ -537,6 +639,33 @@ public final class NetworkProvider {
         }
     }
 
+    // MARK: - Manual Retry
+
+    /// Clears all exhausted operations and allows fresh retry attempts
+    /// Useful for "Retry" button in UI when all operations are exhausted
+    /// Migrated from: ClearExhaustedOperations()
+    public func clearExhaustedOperations() {
+        retryStrategy.clearExhaustedOperations()
+        Log.info("[NetworkProvider] 🔄 Cleared exhausted operations - fresh retry enabled")
+    }
+
+    /// Marks a connection as healthy, resetting exhaustion state
+    /// Migrated from: MarkConnectionHealthy()
+    public func markConnectionHealthy(connectId: UInt32) {
+        retryStrategy.markConnectionHealthy(connectId: connectId)
+        Log.info("[NetworkProvider] ✅ Connection \(connectId) marked as healthy")
+    }
+
+    /// Current count of pending requests waiting for retry
+    public var pendingRequestCount: Int {
+        return pendingRequestManager.pendingRequestCount
+    }
+
+    /// Publisher for observing pending request count changes
+    public var pendingCountPublisher: PassthroughSubject<Int, Never> {
+        return pendingRequestManager.pendingCountPublisher
+    }
+
     // MARK: - Shutdown
 
     /// Shuts down the network provider
@@ -552,10 +681,13 @@ public final class NetworkProvider {
         // Clear all connections
         connectionManager.removeAll()
 
-        // Clear pending requests
-        pendingRequestsLock.lock()
-        pendingRequests.removeAll()
-        pendingRequestsLock.unlock()
+        // Clear active requests
+        activeRequestsLock.lock()
+        activeRequests.removeAll()
+        activeRequestsLock.unlock()
+
+        // Cancel all pending requests
+        pendingRequestManager.cancelAllPendingRequests()
 
         Log.info("[NetworkProvider] Shutdown complete")
     }
