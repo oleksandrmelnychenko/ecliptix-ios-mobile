@@ -123,3 +123,8 @@ public enum SecurityError: LocalizedError {
         }
     }
 }
+
+// MARK: - Type Aliases
+/// Alias for ProtocolConnection (Double Ratchet implementation)
+/// This provides a more intuitive name when used in networking contexts
+public typealias DoubleRatchet = ProtocolConnection

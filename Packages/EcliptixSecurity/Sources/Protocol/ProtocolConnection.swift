@@ -299,7 +299,8 @@ public final class ProtocolConnection {
             return .failure(.generic("Connection has been disposed"))
         }
 
-        guard rootKey.isEmpty || receivingChain == nil else {
+        // Fail if session is already finalized (both rootKey and receivingChain are set)
+        if rootKey.count > 0 && receivingChain != nil {
             return .failure(.generic("Session already finalized"))
         }
 
@@ -761,14 +762,14 @@ public final class ProtocolConnection {
 
         CryptographicHelpers.secureWipe(&rootKey)
         CryptographicHelpers.secureWipe(&sendingDhPrivateKey)
-        if var metaKey = metadataEncryptionKey {
-            CryptographicHelpers.secureWipe(&metaKey)
+        if metadataEncryptionKey != nil {
+            CryptographicHelpers.secureWipe(&metadataEncryptionKey!)
         }
-        if var peerKey = peerDhPublicKey {
-            CryptographicHelpers.secureWipe(&peerKey)
+        if peerDhPublicKey != nil {
+            CryptographicHelpers.secureWipe(&peerDhPublicKey!)
         }
-        if var persistentPrivKey = persistentDhPrivateKey {
-            CryptographicHelpers.secureWipe(&persistentPrivKey)
+        if persistentDhPrivateKey != nil {
+            CryptographicHelpers.secureWipe(&persistentDhPrivateKey!)
         }
     }
 }
