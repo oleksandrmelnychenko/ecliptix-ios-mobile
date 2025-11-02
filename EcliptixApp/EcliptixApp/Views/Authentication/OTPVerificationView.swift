@@ -1,17 +1,10 @@
 import SwiftUI
 
-// MARK: - OTP Verification View
-/// Modern SwiftUI view for OTP verification
-/// 6-digit OTP input with auto-submit and resend functionality
 struct OTPVerificationView: View {
-
-    // MARK: - Environment
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @State private var authService: AuthenticationService
-
-    // MARK: - State
 
     @State private var otpDigits: [String] = Array(repeating: "", count: 6)
     @FocusState private var focusedIndex: Int?
@@ -19,40 +12,29 @@ struct OTPVerificationView: View {
     @State private var resendCountdown: Int = 60
     @State private var canResend: Bool = false
 
-    // MARK: - Properties
-
     private let mobileNumber: String
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-
-    // MARK: - Initialization
 
     init(mobileNumber: String, authService: AuthenticationService) {
         self.mobileNumber = mobileNumber
         _authService = State(initialValue: authService)
     }
 
-    // MARK: - Body
-
     var body: some View {
         NavigationStack {
             ZStack {
-                // Background
+
                 backgroundColor
                     .ignoresSafeArea()
 
-                // Content
                 ScrollView {
                     VStack(spacing: 32) {
-                        // Header
                         headerSection
 
-                        // OTP Input
                         otpInputSection
 
-                        // Verify button
                         verifyButton
 
-                        // Resend section
                         resendSection
                     }
                     .padding(.horizontal, 24)
@@ -82,13 +64,10 @@ struct OTPVerificationView: View {
                 updateCountdown()
             }
             .onAppear {
-                // Auto-focus first field
                 focusedIndex = 0
             }
         }
     }
-
-    // MARK: - Components
 
     private var backgroundColor: Color {
         colorScheme == .dark ? Color.black : Color.white
@@ -96,7 +75,6 @@ struct OTPVerificationView: View {
 
     private var headerSection: some View {
         VStack(spacing: 16) {
-            // Icon
             Circle()
                 .fill(Color.blue.gradient)
                 .frame(width: 80, height: 80)
@@ -185,7 +163,6 @@ struct OTPVerificationView: View {
                 }
             }
 
-            // Change number
             Button {
                 dismiss()
             } label: {
@@ -196,8 +173,6 @@ struct OTPVerificationView: View {
         }
     }
 
-    // MARK: - Computed Properties
-
     private var isVerifyEnabled: Bool {
         otpDigits.allSatisfy { !$0.isEmpty }
     }
@@ -206,65 +181,51 @@ struct OTPVerificationView: View {
         otpDigits.joined()
     }
 
-    // MARK: - Actions
-
     private func handleDigitChange(at index: Int, oldValue: String, newValue: String) {
-        // Limit to single digit
         if newValue.count > 1 {
             otpDigits[index] = String(newValue.last!)
         }
 
-        // Move to next field on input
         if !newValue.isEmpty && index < 5 {
             focusedIndex = index + 1
         }
 
-        // Move to previous field on delete
         if newValue.isEmpty && !oldValue.isEmpty && index > 0 {
             focusedIndex = index - 1
         }
 
-        // Auto-submit when all digits entered
         if otpDigits.allSatisfy({ !$0.isEmpty }) {
             Task {
-                // Small delay for better UX
-                try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
+                try? await Task.sleep(nanoseconds: 300_000_000)
                 await verifyOTP()
             }
         }
     }
 
     private func verifyOTP() async {
-        // Hide keyboard
         focusedIndex = nil
 
         let result = await authService.verifyOTP(code: otpCode)
 
         switch result {
         case .success:
-            // Navigation handled by service
             break
         case .failure:
             showError = true
-            // Clear OTP on error
             clearOTP()
         }
     }
 
     private func resendOTP() async {
-        // Reset countdown
         resendCountdown = 60
         canResend = false
 
-        // Clear current OTP
         clearOTP()
 
-        // Request new OTP
         let result = await authService.resendOTP(mobileNumber: mobileNumber)
 
         switch result {
         case .success:
-            // Show success message
             break
         case .failure:
             showError = true
@@ -285,7 +246,6 @@ struct OTPVerificationView: View {
     }
 
     private func formatMobileNumber(_ number: String) -> String {
-        // Format: +1 (234) 567-8900
         guard number.count >= 10 else { return number }
 
         let areaCode = number.prefix(3)
@@ -296,10 +256,7 @@ struct OTPVerificationView: View {
     }
 }
 
-// MARK: - OTP Digit Field
-
 private struct OTPDigitField: View {
-
     @Binding var digit: String
     let isFocused: Bool
 
@@ -328,11 +285,6 @@ private struct OTPDigitField: View {
     }
 }
 
-// MARK: - Preview
-
 #Preview {
-    OTPVerificationView(
-        mobileNumber: "1234567890",
-        authService: AuthenticationService(networkProvider: nil)
-    )
+    Text("OTPVerificationView Preview")
 }

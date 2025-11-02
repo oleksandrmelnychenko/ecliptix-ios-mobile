@@ -1,0 +1,4 @@
+module COpaqueClient {
+    header "opaque_client_c.h"
+    export *
+}

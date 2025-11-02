@@ -1,26 +1,16 @@
-import Foundation
 import Combine
+import Foundation
 
-// MARK: - Session State Manager
-/// Manages application session state with persistence
-/// Migrated from: Ecliptix.Core/Infrastructure/Session/SessionStateManager.cs
 @MainActor
 public final class SessionStateManager: ObservableObject {
-
-    // MARK: - Published State
 
     @Published public private(set) var sessionState: SessionState = .unauthenticated
     @Published public private(set) var currentUser: UserInfo?
     @Published public private(set) var deviceInfo: DeviceInfo?
 
-    // MARK: - Properties
-
     private let keychainStorage: KeychainStorage
     private let secureStorage: SecureStorage
 
-    // MARK: - Session State
-
-    /// Application session state
     public enum SessionState: String, Codable {
         case unauthenticated
         case authenticating
@@ -29,9 +19,6 @@ public final class SessionStateManager: ObservableObject {
         case expired
     }
 
-    // MARK: - User Info
-
-    /// Current user information
     public struct UserInfo: Codable {
         public let membershipId: String
         public let mobileNumber: String
@@ -54,9 +41,6 @@ public final class SessionStateManager: ObservableObject {
         }
     }
 
-    // MARK: - Device Info
-
-    /// Device information
     public struct DeviceInfo: Codable {
         public let deviceId: String
         public let deviceName: String
@@ -79,9 +63,6 @@ public final class SessionStateManager: ObservableObject {
         }
     }
 
-    // MARK: - Persisted Session
-
-    /// Complete persisted session data
     private struct PersistedSession: Codable {
         let state: SessionState
         let user: UserInfo?
@@ -89,23 +70,25 @@ public final class SessionStateManager: ObservableObject {
         let persistedAt: Date
     }
 
-    // MARK: - Initialization
-
     public init(
-        keychainStorage: KeychainStorage = KeychainStorage(),
+        keychainStorage: KeychainStorage? = nil,
         secureStorage: SecureStorage? = nil
     ) {
-        self.keychainStorage = keychainStorage
-        self.secureStorage = (try? secureStorage) ?? (try! SecureStorage())
+        self.keychainStorage = keychainStorage ?? KeychainStorage()
 
-        // Restore session on init
+        if let provided = secureStorage {
+            self.secureStorage = provided
+        } else {
+            guard let defaultStorage = try? SecureStorage() else {
+                Log.error("[SessionStateManager] Failed to initialize SecureStorage")
+                fatalError("Failed to initialize SecureStorage - check file system permissions")
+            }
+            self.secureStorage = defaultStorage
+        }
+
         restoreSession()
     }
 
-    // MARK: - Session Management
-
-    /// Starts a new authenticated session
-    /// Migrated from: StartSessionAsync()
     public func startSession(user: UserInfo, device: DeviceInfo) {
         self.currentUser = user
         self.deviceInfo = device
@@ -113,11 +96,9 @@ public final class SessionStateManager: ObservableObject {
 
         persistSession()
 
-        Log.info("[SessionState] ✅ Started session for user: \(user.membershipId)")
+        Log.info("[SessionState] [OK] Started session for user: \(user.membershipId)")
     }
 
-    /// Updates current session state
-    /// Migrated from: UpdateSessionStateAsync()
     public func updateState(_ newState: SessionState) {
         guard sessionState != newState else { return }
 
@@ -129,8 +110,6 @@ public final class SessionStateManager: ObservableObject {
         Log.info("[SessionState] State changed: \(oldState.rawValue) → \(newState.rawValue)")
     }
 
-    /// Updates user activity timestamp
-    /// Migrated from: UpdateLastActivityAsync()
     public func updateLastActivity() {
         guard var user = currentUser else { return }
 
@@ -142,8 +121,6 @@ public final class SessionStateManager: ObservableObject {
         Log.debug("[SessionState] Updated last activity")
     }
 
-    /// Ends the current session
-    /// Migrated from: EndSessionAsync()
     public func endSession() {
         sessionState = .unauthenticated
         currentUser = nil
@@ -151,47 +128,36 @@ public final class SessionStateManager: ObservableObject {
 
         clearPersistedSession()
 
-        Log.info("[SessionState] 🔴 Session ended")
+        Log.info("[SessionState] [ERROR] Session ended")
     }
 
-    /// Suspends the current session
-    /// Migrated from: SuspendSessionAsync()
     public func suspendSession() {
         guard sessionState == .authenticated else { return }
 
         updateState(.suspended)
 
-        Log.info("[SessionState] ⏸️ Session suspended")
+        Log.info("[SessionState] ⏸ Session suspended")
     }
 
-    /// Resumes a suspended session
-    /// Migrated from: ResumeSessionAsync()
     public func resumeSession() {
         guard sessionState == .suspended else { return }
 
         updateState(.authenticated)
         updateLastActivity()
 
-        Log.info("[SessionState] ▶️ Session resumed")
+        Log.info("[SessionState]  Session resumed")
     }
 
-    /// Marks session as expired
-    /// Migrated from: ExpireSessionAsync()
     public func expireSession() {
         updateState(.expired)
 
         Log.warning("[SessionState] ⏰ Session expired")
     }
 
-    // MARK: - Session Validation
-
-    /// Checks if session is valid
-    /// Migrated from: IsSessionValid()
     public func isSessionValid() -> Bool {
         return sessionState == .authenticated && currentUser != nil
     }
 
-    /// Checks if session is expired
     public func isSessionExpired(timeout: TimeInterval = 3600) -> Bool {
         guard let user = currentUser else { return true }
 
@@ -199,10 +165,6 @@ public final class SessionStateManager: ObservableObject {
         return timeSinceActivity > timeout
     }
 
-    // MARK: - Persistence
-
-    /// Persists current session state
-    /// Migrated from: PersistSessionAsync()
     private func persistSession() {
         let session = PersistedSession(
             state: sessionState,
@@ -213,19 +175,16 @@ public final class SessionStateManager: ObservableObject {
 
         do {
             try secureStorage.store(session, forKey: "current_session")
-            Log.debug("[SessionState] 💾 Persisted session state")
+            Log.debug("[SessionState]  Persisted session state")
         } catch {
             Log.error("[SessionState] Failed to persist session: \(error)")
         }
     }
 
-    /// Restores session from persistence
-    /// Migrated from: RestoreSessionAsync()
     private func restoreSession() {
         do {
             let session: PersistedSession = try secureStorage.retrieve(forKey: "current_session")
 
-            // Check if session is too old (e.g., > 7 days)
             let sessionAge = Date().timeIntervalSince(session.persistedAt)
             if sessionAge > 7 * 24 * 3600 {
                 Log.warning("[SessionState] Persisted session too old, ignoring")
@@ -233,19 +192,17 @@ public final class SessionStateManager: ObservableObject {
                 return
             }
 
-            // Restore session
             sessionState = session.state
             currentUser = session.user
             deviceInfo = session.device
 
-            // If authenticated, check if expired
             if sessionState == .authenticated {
                 if isSessionExpired() {
                     expireSession()
                 }
             }
 
-            Log.info("[SessionState] ✅ Restored session state: \(sessionState.rawValue)")
+            Log.info("[SessionState] [OK] Restored session state: \(sessionState.rawValue)")
 
         } catch SecureStorageError.notFound {
             Log.debug("[SessionState] No persisted session found")
@@ -254,21 +211,15 @@ public final class SessionStateManager: ObservableObject {
         }
     }
 
-    /// Clears persisted session
-    /// Migrated from: ClearPersistedSessionAsync()
     private func clearPersistedSession() {
         do {
             try secureStorage.delete(forKey: "current_session")
-            Log.debug("[SessionState] 🗑️ Cleared persisted session")
+            Log.debug("[SessionState]  Cleared persisted session")
         } catch {
             Log.error("[SessionState] Failed to clear persisted session: \(error)")
         }
     }
 
-    // MARK: - Device Management
-
-    /// Updates device information
-    /// Migrated from: UpdateDeviceInfoAsync()
     public func updateDeviceInfo(_ device: DeviceInfo) {
         deviceInfo = device
         persistSession()
@@ -276,15 +227,10 @@ public final class SessionStateManager: ObservableObject {
         Log.debug("[SessionState] Updated device info")
     }
 
-    /// Gets current device ID
     public func getCurrentDeviceId() -> String? {
         return deviceInfo?.deviceId
     }
 
-    // MARK: - User Management
-
-    /// Updates user information
-    /// Migrated from: UpdateUserInfoAsync()
     public func updateUserInfo(_ user: UserInfo) {
         currentUser = user
         persistSession()
@@ -292,14 +238,10 @@ public final class SessionStateManager: ObservableObject {
         Log.debug("[SessionState] Updated user info")
     }
 
-    /// Gets current membership ID
     public func getCurrentMembershipId() -> String? {
         return currentUser?.membershipId
     }
 
-    // MARK: - Session Statistics
-
-    /// Returns session statistics
     public func getStatistics() -> SessionStatistics {
         let sessionDuration: TimeInterval?
         if let user = currentUser {
@@ -327,9 +269,6 @@ public final class SessionStateManager: ObservableObject {
     }
 }
 
-// MARK: - Statistics
-
-/// Session statistics
 public struct SessionStatistics {
     public let state: SessionStateManager.SessionState
     public let isValid: Bool

@@ -1,7 +1,5 @@
 import Foundation
 
-// MARK: - Service Failure Types
-/// Represents failures that can occur in internal services
 public enum ServiceFailure: LocalizedError, Equatable {
     case secureStoreKeyNotFound(String)
     case secureStoreAccessDenied(String, String?)
@@ -41,8 +39,6 @@ public enum ServiceFailure: LocalizedError, Equatable {
         return lhs.message == rhs.message
     }
 }
-
-// MARK: - Application Error Messages
 public struct ApplicationErrorMessages {
     public struct SecureStorageProvider {
         public static let applicationSettingsNotFound = "Application settings not found in secure storage"

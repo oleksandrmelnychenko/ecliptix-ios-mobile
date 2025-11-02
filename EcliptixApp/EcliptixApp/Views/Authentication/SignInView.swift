@@ -1,50 +1,41 @@
 import SwiftUI
 
-// MARK: - Sign In View
-/// Modern SwiftUI view for user sign-in
-/// Uses service-based architecture with @Observable
 struct SignInView: View {
 
-    // MARK: - Environment
-
     @Environment(\.colorScheme) private var colorScheme
-    @State private var authService: AuthenticationService
+    @State private var service: SignInService
 
-    // MARK: - State
-
-    @State private var mobileNumber: String = ""
-    @State private var secureKey: String = ""
     @State private var showSecureKey: Bool = false
     @State private var showError: Bool = false
 
-    // MARK: - Initialization
+    let onBack: () -> Void
+    let onForgotPassword: () -> Void
 
-    init(authService: AuthenticationService) {
-        _authService = State(initialValue: authService)
+    init(
+        service: SignInService,
+        onBack: @escaping () -> Void,
+        onForgotPassword: @escaping () -> Void
+    ) {
+        _service = State(initialValue: service)
+        self.onBack = onBack
+        self.onForgotPassword = onForgotPassword
     }
-
-    // MARK: - Body
 
     var body: some View {
         NavigationStack {
             ZStack {
-                // Background
+
                 backgroundColor
                     .ignoresSafeArea()
 
-                // Content
                 ScrollView {
                     VStack(spacing: 32) {
-                        // Logo and title
                         headerSection
 
-                        // Input fields
                         inputSection
 
-                        // Sign in button
                         signInButton
 
-                        // Alternative actions
                         alternativeActionsSection
                     }
                     .padding(.horizontal, 24)
@@ -55,15 +46,13 @@ struct SignInView: View {
             .alert("Error", isPresented: $showError) {
                 Button("OK") {
                     showError = false
-                    authService.errorMessage = nil
+                    service.serverError = nil
                 }
             } message: {
-                Text(authService.errorMessage ?? "An error occurred")
+                Text(service.serverError ?? "An error occurred")
             }
         }
     }
-
-    // MARK: - Components
 
     private var backgroundColor: Color {
         colorScheme == .dark ? Color.black : Color.white
@@ -71,7 +60,6 @@ struct SignInView: View {
 
     private var headerSection: some View {
         VStack(spacing: 16) {
-            // Logo placeholder
             Circle()
                 .fill(Color.blue.gradient)
                 .frame(width: 80, height: 80)
@@ -82,10 +70,10 @@ struct SignInView: View {
                 }
 
             VStack(spacing: 8) {
-                Text("Welcome Back")
+                Text(service.welcomeBackText)
                     .font(.system(size: 32, weight: .bold))
 
-                Text("Sign in to continue to Ecliptix")
+                Text(service.signInSubtitleText)
                     .font(.system(size: 16))
                     .foregroundColor(.secondary)
             }
@@ -94,13 +82,12 @@ struct SignInView: View {
 
     private var inputSection: some View {
         VStack(spacing: 20) {
-            // Mobile number field
             VStack(alignment: .leading, spacing: 8) {
-                Text("Mobile Number")
+                Text(service.mobileNumberLabelText)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(.secondary)
 
-                TextField("Enter your mobile number", text: $mobileNumber)
+                TextField("Enter your mobile number", text: $service.mobileNumber)
                     .textContentType(.telephoneNumber)
                     .keyboardType(.phonePad)
                     .padding()
@@ -108,22 +95,37 @@ struct SignInView: View {
                     .cornerRadius(12)
                     .overlay(
                         RoundedRectangle(cornerRadius: 12)
-                            .stroke(focusedField == .mobile ? Color.blue : Color.clear, lineWidth: 2)
+                            .stroke(
+                                service.hasMobileNumberError ? Color.red :
+                                    focusedField == .mobile ? Color.blue : Color.clear,
+                                lineWidth: 2
+                            )
                     )
+                    .focused($focusedField, equals: .mobile)
+                    .onSubmit {
+                        service.markMobileNumberAsTouched()
+                        focusedField = .secureKey
+                    }
+
+                if let error = service.mobileNumberError, !error.isEmpty {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .transition(.opacity)
+                }
             }
 
-            // Secure key field
             VStack(alignment: .leading, spacing: 8) {
-                Text("Secure Key")
+                Text(service.secureKeyLabelText)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(.secondary)
 
                 HStack {
                     if showSecureKey {
-                        TextField("Enter your secure key", text: $secureKey)
+                        TextField("Enter your secure key", text: $service.secureKey)
                             .textContentType(.password)
                     } else {
-                        SecureField("Enter your secure key", text: $secureKey)
+                        SecureField("Enter your secure key", text: $service.secureKey)
                             .textContentType(.password)
                     }
 
@@ -139,8 +141,28 @@ struct SignInView: View {
                 .cornerRadius(12)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(focusedField == .secureKey ? Color.blue : Color.clear, lineWidth: 2)
+                        .stroke(
+                            service.hasSecureKeyError ? Color.red :
+                                focusedField == .secureKey ? Color.blue : Color.clear,
+                            lineWidth: 2
+                        )
                 )
+                .focused($focusedField, equals: .secureKey)
+                .onSubmit {
+                    service.markSecureKeyAsTouched()
+                    if service.canSignIn {
+                        Task {
+                            await performSignIn()
+                        }
+                    }
+                }
+
+                if let error = service.secureKeyError, !error.isEmpty {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .transition(.opacity)
+                }
             }
         }
     }
@@ -152,56 +174,55 @@ struct SignInView: View {
             }
         } label: {
             HStack {
-                if authService.isLoading {
+                if service.isBusy {
                     ProgressView()
                         .progressViewStyle(.circular)
                         .tint(.white)
                 } else {
-                    Text("Sign In")
+                    Text(service.signInButtonText)
                         .font(.system(size: 17, weight: .semibold))
                 }
             }
             .frame(maxWidth: .infinity)
             .frame(height: 56)
-            .background(isSignInEnabled ? Color.blue : Color.secondary.opacity(0.3))
+            .background(service.canSignIn ? Color.blue : Color.secondary.opacity(0.3))
             .foregroundColor(.white)
             .cornerRadius(16)
         }
-        .disabled(!isSignInEnabled || authService.isLoading)
+        .disabled(!service.canSignIn || service.isBusy)
     }
 
     private var alternativeActionsSection: some View {
         VStack(spacing: 16) {
-            // Forgot secure key
             Button {
-                // Navigate to recovery
+                service.startAccountRecovery()
+                onForgotPassword()
             } label: {
-                Text("Forgot your secure key?")
+                Text(service.forgotSecureKeyText)
                     .font(.system(size: 15))
                     .foregroundColor(.blue)
             }
+            .disabled(service.isBusy)
 
             Divider()
                 .padding(.vertical, 8)
 
-            // Register
             HStack(spacing: 4) {
-                Text("Don't have an account?")
+                Text(service.noAccountText)
                     .font(.system(size: 15))
                     .foregroundColor(.secondary)
 
                 Button {
-                    // Navigate to registration
+                    onBack()
                 } label: {
-                    Text("Register")
+                    Text(service.registerText)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(.blue)
                 }
             }
+            .disabled(service.isBusy)
         }
     }
-
-    // MARK: - Computed Properties
 
     @FocusState private var focusedField: Field?
 
@@ -210,36 +231,24 @@ struct SignInView: View {
         case secureKey
     }
 
-    private var isSignInEnabled: Bool {
-        !mobileNumber.isEmpty && !secureKey.isEmpty
-    }
-
-    // MARK: - Actions
-
     private func performSignIn() async {
-        // Hide keyboard
+        Log.info("[SignInView] Performing sign-in")
+
         focusedField = nil
 
-        // Perform sign-in via service
-        let result = await authService.signIn(
-            mobileNumber: mobileNumber,
-            secureKey: secureKey
-        )
+        let result = await service.signIn()
 
         switch result {
-        case .success:
-            // Navigation handled by service or coordinator
-            break
-        case .failure:
+        case .success(let userId):
+            Log.info("[SignInView] Sign-in successful for user: \(userId)")
+
+        case .failure(let error):
+            Log.error("[SignInView] Sign-in failed: \(error.localizedDescription)")
             showError = true
         }
     }
 }
 
-// MARK: - Preview
-
 #Preview {
-    SignInView(authService: AuthenticationService(
-        networkProvider: nil // Preview with nil
-    ))
+    Text("SignInView Preview")
 }

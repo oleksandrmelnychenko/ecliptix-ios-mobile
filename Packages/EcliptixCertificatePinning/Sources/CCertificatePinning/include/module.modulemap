@@ -1,0 +1,4 @@
+module CCertificatePinning {
+    header "ecliptix_client.h"
+    export *
+}

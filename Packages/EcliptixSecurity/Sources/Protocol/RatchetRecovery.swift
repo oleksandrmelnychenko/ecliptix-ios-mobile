@@ -1,60 +1,72 @@
-import Foundation
 import Crypto
 import EcliptixCore
+import Foundation
 
-// MARK: - Ratchet Recovery
-/// Stores and recovers skipped message keys for out-of-order message delivery
-/// Migrated from: Ecliptix.Protocol.System/Core/RatchetRecovery.cs
-public final class RatchetRecovery: KeyProvider {
-
-    // MARK: - Properties
+public final class RatchetRecovery: @unchecked Sendable, KeyProvider {
     private var skippedMessageKeys: [UInt32: Data] = [:]
     private let maxSkippedMessages: UInt32
     private let lock = NSLock()
-    private var isDisposed = false
 
-    // MARK: - Initialization
+    private let storage: SkippedMessageKeysStorage?
+    private let connectId: String?
+    private let membershipId: UUID?
+    private var isDirty: Bool = false
+
     public init(maxSkippedMessages: UInt32 = 1000) {
         self.maxSkippedMessages = maxSkippedMessages
+        self.storage = nil
+        self.connectId = nil
+        self.membershipId = nil
+    }
+
+    public init(
+        maxSkippedMessages: UInt32 = 1000,
+        storage: SkippedMessageKeysStorage,
+        connectId: String,
+        membershipId: UUID
+    ) async throws {
+        self.maxSkippedMessages = maxSkippedMessages
+        self.storage = storage
+        self.connectId = connectId
+        self.membershipId = membershipId
+
+        do {
+            self.skippedMessageKeys = try await storage.loadKeys(
+                connectId: connectId,
+                membershipId: membershipId
+            )
+            Log.info("[RatchetRecovery] [OK] Loaded \(skippedMessageKeys.count) skipped keys from storage")
+        } catch {
+            Log.warning("[RatchetRecovery] Failed to load skipped keys, starting fresh: \(error.localizedDescription)")
+            self.skippedMessageKeys = [:]
+        }
     }
 
     deinit {
-        dispose()
+
+        for (_, var key) in skippedMessageKeys {
+            CryptographicHelpers.secureWipe(&key)
+        }
     }
 
-    // MARK: - Try Recover Message Key
-    /// Attempts to recover a previously skipped message key
-    /// Migrated from: TryRecoverMessageKey()
-    public func tryRecoverMessageKey(messageIndex: UInt32) -> Result<Option<RatchetChainKey>, ProtocolFailure> {
-        guard !isDisposed else {
-            return .failure(.generic("RatchetRecovery has been disposed"))
-        }
-
+    public func tryRecoverMessageKey(messageIndex: UInt32) -> RatchetChainKey? {
         lock.lock()
         defer { lock.unlock() }
 
         if skippedMessageKeys[messageIndex] != nil {
-            let messageKey = RatchetChainKey(index: messageIndex, keyProvider: self)
-            return .success(.some(messageKey))
+            return RatchetChainKey(index: messageIndex, keyProvider: self)
         }
 
-        return .success(.none)
+        return nil
     }
 
-    // MARK: - Store Skipped Message Keys
-    /// Derives and stores message keys for skipped indices
-    /// Migrated from: StoreSkippedMessageKeys()
     public func storeSkippedMessageKeys(
         currentChainKey: Data,
         fromIndex: UInt32,
         toIndex: UInt32
-    ) -> Result<Unit, ProtocolFailure> {
-        guard !isDisposed else {
-            return .failure(.generic("RatchetRecovery has been disposed"))
-        }
-
+    ) throws {
         guard toIndex > fromIndex else {
-            return .success(.value)
+            return
         }
 
         lock.lock()
@@ -62,36 +74,31 @@ public final class RatchetRecovery: KeyProvider {
 
         let skippedCount = toIndex - fromIndex
         if UInt32(skippedMessageKeys.count) + skippedCount > maxSkippedMessages {
-            return .failure(.generic("Too many skipped messages: \(skippedMessageKeys.count + Int(skippedCount)) > \(maxSkippedMessages)"))
+            throw ProtocolFailure.generic("Too many skipped messages: \(skippedMessageKeys.count + Int(skippedCount)) > \(maxSkippedMessages)")
         }
 
         var chainKey = Data(currentChainKey)
+        defer {
 
-        for index in fromIndex..<toIndex {
-            // Derive message key
-            guard case .success(let messageKey) = deriveMessageKey(from: chainKey, index: index) else {
-                return .failure(.generic("Failed to derive message key for index \(index)"))
-            }
-
-            // Store it
-            skippedMessageKeys[index] = messageKey
-
-            // Advance chain key
-            guard case .success(let nextChainKey) = advanceChainKey(chainKey) else {
-                return .failure(.generic("Failed to advance chain key at index \(index)"))
-            }
-
-            chainKey = nextChainKey
+            CryptographicHelpers.secureWipe(&chainKey)
         }
 
-        // Secure wipe the chain key
-        CryptographicHelpers.secureWipe(&chainKey)
+        for index in fromIndex..<toIndex {
 
-        return .success(.value)
+            let messageKey = try deriveMessageKey(from: chainKey, index: index)
+
+            skippedMessageKeys[index] = messageKey
+
+            chainKey = try advanceChainKey(chainKey)
+        }
+
+        isDirty = true
+
+        Task { [weak self] in
+            await self?.persistIfNeeded()
+        }
     }
-
-    // MARK: - Derive Message Key
-    private func deriveMessageKey(from chainKey: Data, index: UInt32) -> Result<Data, ProtocolFailure> {
+    private func deriveMessageKey(from chainKey: Data, index: UInt32) throws -> Data {
         do {
             let messageKey = try HKDFKeyDerivation.deriveKey(
                 inputKeyMaterial: chainKey,
@@ -99,14 +106,12 @@ public final class RatchetRecovery: KeyProvider {
                 info: Data(CryptographicConstants.msgInfo),
                 outputByteCount: CryptographicConstants.aesKeySize
             )
-            return .success(messageKey)
+            return messageKey
         } catch {
-            return .failure(.generic("Failed to derive message key for index \(index): \(error.localizedDescription)"))
+            throw ProtocolFailure.generic("Failed to derive message key for index \(index): \(error.localizedDescription)")
         }
     }
-
-    // MARK: - Advance Chain Key
-    private func advanceChainKey(_ chainKey: Data) -> Result<Data, ProtocolFailure> {
+    private func advanceChainKey(_ chainKey: Data) throws -> Data {
         do {
             let nextChainKey = try HKDFKeyDerivation.deriveKey(
                 inputKeyMaterial: chainKey,
@@ -114,60 +119,120 @@ public final class RatchetRecovery: KeyProvider {
                 info: Data(CryptographicConstants.chainInfo),
                 outputByteCount: CryptographicConstants.x25519KeySize
             )
-            return .success(nextChainKey)
+            return nextChainKey
         } catch {
-            return .failure(.generic("Failed to advance chain key: \(error.localizedDescription)"))
+            throw ProtocolFailure.generic("Failed to advance chain key: \(error.localizedDescription)")
         }
     }
 
-    // MARK: - Cleanup Old Keys
-    /// Removes old skipped keys before a certain index
     public func cleanupOldKeys(beforeIndex: UInt32) {
-        guard !isDisposed else { return }
-
         lock.lock()
         defer { lock.unlock() }
 
         let keysToRemove = skippedMessageKeys.keys.filter { $0 < beforeIndex }
+        guard !keysToRemove.isEmpty else { return }
+
         for key in keysToRemove {
             if var removedKey = skippedMessageKeys.removeValue(forKey: key) {
                 CryptographicHelpers.secureWipe(&removedKey)
             }
         }
+
+        isDirty = true
+
+        Task { [weak self] in
+            await self?.persistIfNeeded()
+        }
     }
 
-    // MARK: - KeyProvider Implementation
+    private func persistIfNeeded() async {
+        guard let storage = storage,
+              let connectId = connectId,
+              let membershipId = membershipId else {
+            return
+        }
+
+        let shouldPersist = lock.withLock { isDirty }
+        guard shouldPersist else { return }
+
+        let keysToPersist = lock.withLock {
+            let keys = skippedMessageKeys
+            isDirty = false
+            return keys
+        }
+
+        do {
+            try await storage.saveKeys(
+                keysToPersist,
+                connectId: connectId,
+                membershipId: membershipId
+            )
+            Log.debug("[RatchetRecovery] [OK] Persisted \(keysToPersist.count) skipped keys")
+        } catch {
+            Log.error("[RatchetRecovery] Failed to persist skipped keys: \(error.localizedDescription)")
+
+            lock.withLock {
+                isDirty = true
+            }
+        }
+    }
+
+    public func flushToStorage() async throws {
+        guard let storage = storage,
+              let connectId = connectId,
+              let membershipId = membershipId else {
+            return
+        }
+
+        let keysToPersist = lock.withLock {
+            let keys = skippedMessageKeys
+            isDirty = false
+            return keys
+        }
+
+        try await storage.saveKeys(
+            keysToPersist,
+            connectId: connectId,
+            membershipId: membershipId
+        )
+        Log.info("[RatchetRecovery] [OK] Flushed \(keysToPersist.count) skipped keys to storage")
+    }
+
+    public func clearStorage() async throws {
+        guard let storage = storage,
+              let connectId = connectId,
+              let membershipId = membershipId else {
+            return
+        }
+
+        try await storage.deleteKeys(connectId: connectId, membershipId: membershipId)
+        Log.info("[RatchetRecovery] Cleared skipped keys from storage")
+    }
     public func executeWithKey<T>(
         keyIndex: UInt32,
-        operation: (Data) -> Result<T, ProtocolFailure>
-    ) -> Result<T, ProtocolFailure> {
-        guard !isDisposed else {
-            return .failure(.generic("RatchetRecovery has been disposed"))
-        }
-
+        operation: (Data) throws -> T
+    ) throws -> T {
         lock.lock()
-        defer { lock.unlock() }
 
         guard let keyMaterial = skippedMessageKeys[keyIndex] else {
-            return .failure(.generic("Skipped key with index \(keyIndex) not found"))
+            lock.unlock()
+            throw ProtocolFailure.generic("Skipped key with index \(keyIndex) not found")
         }
 
-        return operation(keyMaterial)
-    }
+        let result = try operation(keyMaterial)
 
-    // MARK: - Dispose
-    public func dispose() {
-        guard !isDisposed else { return }
-
-        lock.lock()
-        defer { lock.unlock() }
-
-        // Secure wipe all keys
-        for (_, var key) in skippedMessageKeys {
-            CryptographicHelpers.secureWipe(&key)
+        if var removedKey = skippedMessageKeys.removeValue(forKey: keyIndex) {
+            CryptographicHelpers.secureWipe(&removedKey)
         }
 
-        skippedMessageKeys.removeAll()
-        isDisposed = true
+        isDirty = true
+
+        lock.unlock()
+
+        Task { [weak self] in
+            await self?.persistIfNeeded()
+        }
+
+        return result
     }
 }

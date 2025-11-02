@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package common;
+
+option csharp_namespace = "Ecliptix.Protobuf.Common";
+
+// Standard result codes for RPC operations
+// Migrated from: Ecliptix.Protobufs/Sources/common/types.proto
+enum ResultCode {
+  // Operation completed successfully
+  SUCCESS = 0;
+
+  // Client sent an invalid request
+  INVALID_REQUEST = 1;
+
+  // Authentication required or credentials invalid
+  UNAUTHORIZED = 2;
+
+  // Client does not have permission to access resource
+  FORBIDDEN = 3;
+
+  // Requested resource not found
+  NOT_FOUND = 4;
+
+  // Resource already exists (duplicate)
+  CONFLICT = 5;
+
+  // Rate limit exceeded, client should back off
+  RATE_LIMITED = 6;
+
+  // Internal server error
+  INTERNAL_ERROR = 7;
+}
+
+// Standard error response structure
+// Provides detailed error information to clients
+message ErrorResponse {
+  // Result code indicating the type of error
+  ResultCode code = 1;
+
+  // Human-readable error message
+  string message = 2;
+
+  // Additional error details as key-value pairs
+  // Examples: "field" -> "email", "reason" -> "invalid format"
+  map<string, string> details = 3;
+}

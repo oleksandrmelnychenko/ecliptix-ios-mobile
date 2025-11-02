@@ -1,12 +1,7 @@
-import Foundation
 import EcliptixCore
+import Foundation
 
-// MARK: - Replay Protection
-/// Protects against replay attacks by tracking processed nonces and message indices
-/// Migrated from: Ecliptix.Protocol.System/Core/ReplayProtection.cs
-public final class ReplayProtection {
-
-    // MARK: - Properties
+public final class ReplayProtection: @unchecked Sendable {
     private var processedNonces: [String: Date] = [:]
     private var messageWindows: [UInt64: MessageWindow] = [:]
     private let nonceLifetime: TimeInterval
@@ -17,11 +12,8 @@ public final class ReplayProtection {
     private var lastWindowAdjustment: Date = Date()
     private var cleanupTimer: Timer?
     private let lock = NSLock()
-    private var isDisposed = false
-
-    // MARK: - Initialization
     public init(
-        nonceLifetime: TimeInterval = 300, // 5 minutes
+        nonceLifetime: TimeInterval = 300,
         maxOutOfOrderWindow: UInt64 = 1000,
         maxWindow: UInt64 = 5000
     ) {
@@ -30,7 +22,6 @@ public final class ReplayProtection {
         self.maxOutOfOrderWindow = maxOutOfOrderWindow
         self.maxWindow = maxWindow
 
-        // Start cleanup timer (every 30 seconds)
         self.cleanupTimer = Timer.scheduledTimer(
             withTimeInterval: 30.0,
             repeats: true
@@ -41,21 +32,14 @@ public final class ReplayProtection {
     }
 
     deinit {
-        dispose()
+        cleanupTimer?.invalidate()
     }
 
-    // MARK: - Check and Record Message
-    /// Checks if a message has been seen before and records it
-    /// Migrated from: CheckAndRecordMessage()
     public func checkAndRecordMessage(
         nonce: Data,
         messageIndex: UInt64,
         chainIndex: UInt64 = 0
-    ) -> Result<Unit, ProtocolFailure> {
-        guard !isDisposed else {
-            return .failure(.generic("ReplayProtection has been disposed"))
-        }
-
+    ) -> Result<Void, ProtocolFailure> {
         guard !nonce.isEmpty else {
             return .failure(.generic("Nonce cannot be null or empty"))
         }
@@ -63,31 +47,26 @@ public final class ReplayProtection {
         lock.lock()
         defer { lock.unlock() }
 
-        // Check nonce
         let nonceKey = nonce.base64EncodedString()
         if processedNonces[nonceKey] != nil {
             return .failure(.generic("Replay attack detected: nonce already processed"))
         }
 
-        // Check message window
         let windowCheck = checkMessageWindow(chainIndex: chainIndex, messageIndex: messageIndex)
         if case .failure(let error) = windowCheck {
             return .failure(error)
         }
 
-        // Record
         processedNonces[nonceKey] = Date()
         updateMessageWindow(chainIndex: chainIndex, messageIndex: messageIndex)
         recentMessageCount += 1
 
-        return .success(.value)
+        return .success(())
     }
-
-    // MARK: - Check Message Window
-    private func checkMessageWindow(chainIndex: UInt64, messageIndex: UInt64) -> Result<Unit, ProtocolFailure> {
+    private func checkMessageWindow(chainIndex: UInt64, messageIndex: UInt64) -> Result<Void, ProtocolFailure> {
         guard let window = messageWindows[chainIndex] else {
             messageWindows[chainIndex] = MessageWindow(initialIndex: messageIndex)
-            return .success(.value)
+            return .success(())
         }
 
         if messageIndex <= window.highestProcessedIndex {
@@ -101,10 +80,8 @@ public final class ReplayProtection {
             }
         }
 
-        return .success(.value)
+        return .success(())
     }
-
-    // MARK: - Update Message Window
     private func updateMessageWindow(chainIndex: UInt64, messageIndex: UInt64) {
         if let window = messageWindows[chainIndex] {
             window.markProcessed(messageIndex)
@@ -112,32 +89,22 @@ public final class ReplayProtection {
             messageWindows[chainIndex] = MessageWindow(initialIndex: messageIndex)
         }
     }
-
-    // MARK: - Cleanup Expired Entries
     private func cleanupExpiredEntries() {
-        guard !isDisposed else { return }
-
         let cutoff = Date().addingTimeInterval(-nonceLifetime)
 
         lock.lock()
         defer { lock.unlock() }
 
-        // Clean up old nonces
         let expiredKeys = processedNonces.filter { $0.value < cutoff }.map { $0.key }
         for key in expiredKeys {
             processedNonces.removeValue(forKey: key)
         }
 
-        // Clean up old message windows
         for (_, window) in messageWindows {
             window.cleanupOldEntries(cutoff: cutoff)
         }
     }
-
-    // MARK: - Adjust Window Size
     private func adjustWindowSize() {
-        guard !isDisposed else { return }
-
         let now = Date()
         guard now.timeIntervalSince(lastWindowAdjustment) >= 30.0 else { return }
 
@@ -158,35 +125,14 @@ public final class ReplayProtection {
         lastWindowAdjustment = now
     }
 
-    // MARK: - On Ratchet Rotation
-    /// Clears message windows when ratchet rotates
     public func onRatchetRotation() {
-        guard !isDisposed else { return }
-
         lock.lock()
         defer { lock.unlock() }
 
-        messageWindows.removeAll()
-    }
-
-    // MARK: - Dispose
-    public func dispose() {
-        guard !isDisposed else { return }
-
-        isDisposed = true
-        cleanupTimer?.invalidate()
-        cleanupTimer = nil
-
-        lock.lock()
-        defer { lock.unlock() }
-
-        processedNonces.removeAll()
         messageWindows.removeAll()
     }
 }
 
-// MARK: - Message Window
-/// Tracks processed message indices within a chain
 private final class MessageWindow {
     private var processedIndices: Set<UInt64> = []
     private let createdAt: Date = Date()

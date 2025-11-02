@@ -1,15 +1,9 @@
-import Foundation
 import EcliptixCore
+import Foundation
 
-// MARK: - Request Timeout Manager
-/// Manages timeouts for network requests with per-operation configuration
-/// Migrated from: Ecliptix.Core/Services/Network/Infrastructure/RequestTimeoutManager.cs
 @MainActor
 public final class RequestTimeoutManager {
 
-    // MARK: - Timeout Entry
-
-    /// Active timeout tracking entry
     private class TimeoutEntry {
         let requestId: String
         let startTime: Date
@@ -41,27 +35,18 @@ public final class RequestTimeoutManager {
         }
     }
 
-    // MARK: - Properties
-
     private let configuration: TimeoutConfiguration
 
-    /// Active timeout entries
     private var activeTimeouts: [String: TimeoutEntry] = [:]
-    private let timeoutsLock = NSLock()
 
-    /// Timeout check timer
-    private var checkTimer: Timer?
+    nonisolated(unsafe) private var checkTimer: Timer?
 
-    /// Statistics
     private var totalTimeouts: Int = 0
     private var totalRequests: Int = 0
-
-    // MARK: - Initialization
 
     public init(configuration: TimeoutConfiguration = .default) {
         self.configuration = configuration
 
-        // Start timeout check timer
         startCheckTimer()
     }
 
@@ -69,18 +54,11 @@ public final class RequestTimeoutManager {
         checkTimer?.invalidate()
     }
 
-    // MARK: - Timeout Tracking
-
-    /// Starts tracking timeout for a request
-    /// Migrated from: StartTrackingRequest()
     public func startTracking(
         requestId: String,
         timeout: TimeInterval? = nil,
         onTimeout: @escaping () -> Void
     ) {
-        timeoutsLock.lock()
-        defer { timeoutsLock.unlock() }
-
         let timeoutDuration = timeout ?? configuration.defaultTimeout
 
         let entry = TimeoutEntry(
@@ -92,31 +70,20 @@ public final class RequestTimeoutManager {
         activeTimeouts[requestId] = entry
         totalRequests += 1
 
-        Log.debug("[TimeoutManager] ⏱️ Tracking request: \(requestId) (timeout: \(String(format: "%.1f", timeoutDuration))s)")
+        Log.debug("[TimeoutManager] ⏱ Tracking request: \(requestId) (timeout: \(String(format: "%.1f", timeoutDuration))s)")
     }
 
-    /// Stops tracking timeout for a request (call when request completes)
-    /// Migrated from: StopTrackingRequest()
     public func stopTracking(requestId: String) {
-        timeoutsLock.lock()
-        defer { timeoutsLock.unlock() }
-
         if let entry = activeTimeouts.removeValue(forKey: requestId) {
-            Log.debug("[TimeoutManager] ✅ Completed request: \(requestId) (elapsed: \(String(format: "%.2f", entry.elapsedTime))s)")
+            Log.debug("[TimeoutManager] [OK] Completed request: \(requestId) (elapsed: \(String(format: "%.2f", entry.elapsedTime))s)")
         }
     }
 
-    /// Extends timeout for an existing request
-    /// Migrated from: ExtendTimeout()
     public func extendTimeout(requestId: String, additionalTime: TimeInterval) {
-        timeoutsLock.lock()
-        defer { timeoutsLock.unlock() }
-
         guard let entry = activeTimeouts[requestId] else {
             return
         }
 
-        // Create new entry with extended timeout
         let newEntry = TimeoutEntry(
             requestId: requestId,
             timeoutDuration: entry.timeoutDuration + additionalTime,
@@ -124,15 +91,10 @@ public final class RequestTimeoutManager {
         )
 
         activeTimeouts[requestId] = newEntry
-        Log.debug("[TimeoutManager] ⏱️ Extended timeout for: \(requestId) (+\(String(format: "%.1f", additionalTime))s)")
+        Log.debug("[TimeoutManager] ⏱ Extended timeout for: \(requestId) (+\(String(format: "%.1f", additionalTime))s)")
     }
 
-    /// Checks if request has timed out
-    /// Migrated from: IsTimedOut()
     public func isTimedOut(requestId: String) -> Bool {
-        timeoutsLock.lock()
-        defer { timeoutsLock.unlock() }
-
         guard let entry = activeTimeouts[requestId] else {
             return false
         }
@@ -140,39 +102,30 @@ public final class RequestTimeoutManager {
         return entry.isTimedOut
     }
 
-    /// Gets remaining time for a request
     public func getRemainingTime(requestId: String) -> TimeInterval? {
-        timeoutsLock.lock()
-        defer { timeoutsLock.unlock() }
-
         return activeTimeouts[requestId]?.remainingTime
     }
-
-    // MARK: - Timeout Checking
 
     private func startCheckTimer() {
         checkTimer = Timer.scheduledTimer(
             withTimeInterval: configuration.checkInterval,
             repeats: true
         ) { [weak self] _ in
-            self?.checkTimeouts()
-        }
-    }
-
-    private func checkTimeouts() {
-        timeoutsLock.lock()
-        var timedOutEntries: [TimeoutEntry] = []
-
-        for (requestId, entry) in activeTimeouts {
-            if entry.isTimedOut {
-                timedOutEntries.append(entry)
-                activeTimeouts.removeValue(forKey: requestId)
+            Task { @MainActor in
+                self?.checkTimeouts()
             }
         }
 
-        timeoutsLock.unlock()
+        RunLoop.main.add(checkTimer!, forMode: .common)
+    }
 
-        // Execute timeout callbacks outside of lock
+    private func checkTimeouts() {
+        let timedOutEntries = activeTimeouts.values.filter { $0.isTimedOut }
+
+        for entry in timedOutEntries {
+            activeTimeouts.removeValue(forKey: entry.requestId)
+        }
+
         for entry in timedOutEntries {
             totalTimeouts += 1
             Log.warning("[TimeoutManager] ⏰ Request TIMED OUT: \(entry.requestId) (duration: \(String(format: "%.2f", entry.timeoutDuration))s)")
@@ -180,37 +133,20 @@ public final class RequestTimeoutManager {
         }
     }
 
-    // MARK: - Batch Operations
-
-    /// Cancels all active timeouts
-    /// Migrated from: CancelAllTimeouts()
     public func cancelAll() {
-        timeoutsLock.lock()
-        defer { timeoutsLock.unlock() }
-
         let count = activeTimeouts.count
         activeTimeouts.removeAll()
 
         if count > 0 {
-            Log.info("[TimeoutManager] 🛑 Cancelled all \(count) active timeouts")
+            Log.info("[TimeoutManager]  Cancelled all \(count) active timeouts")
         }
     }
 
-    /// Gets count of active timeouts
     public var activeTimeoutCount: Int {
-        timeoutsLock.lock()
-        defer { timeoutsLock.unlock() }
-
         return activeTimeouts.count
     }
 
-    // MARK: - Statistics
-
-    /// Returns timeout statistics
     public func getStatistics() -> TimeoutStatistics {
-        timeoutsLock.lock()
-        defer { timeoutsLock.unlock() }
-
         let timeoutRate = totalRequests > 0 ? Double(totalTimeouts) / Double(totalRequests) : 0.0
 
         return TimeoutStatistics(
@@ -221,54 +157,38 @@ public final class RequestTimeoutManager {
         )
     }
 
-    /// Resets statistics
     public func resetStatistics() {
-        timeoutsLock.lock()
-        defer { timeoutsLock.unlock() }
-
         totalTimeouts = 0
         totalRequests = 0
 
-        Log.debug("[TimeoutManager] 📊 Reset timeout statistics")
+        Log.debug("[TimeoutManager]  Reset timeout statistics")
     }
 
-    // MARK: - Helper: Execute with Timeout
-
-    /// Executes an operation with timeout
-    /// Migrated from: ExecuteWithTimeoutAsync()
-    public func execute<T>(
+    public func execute<T: Sendable>(
         requestId: String,
         timeout: TimeInterval? = nil,
-        operation: @escaping () async throws -> T
+        operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
 
         return try await withThrowingTaskGroup(of: T.self) { group in
             let timeoutDuration = timeout ?? configuration.defaultTimeout
 
-            // Add operation task
             group.addTask {
                 return try await operation()
             }
 
-            // Add timeout task
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(timeoutDuration * 1_000_000_000))
                 throw TimeoutError.timeout(duration: timeoutDuration)
             }
 
-            // Start tracking
-            startTracking(requestId: requestId, timeout: timeoutDuration) {
-                // Timeout callback - cancel group
-                group.cancelAll()
-            }
+            startTracking(requestId: requestId, timeout: timeoutDuration, onTimeout: {})
 
             defer {
-                // Stop tracking when done
                 stopTracking(requestId: requestId)
                 group.cancelAll()
             }
 
-            // Return first result
             guard let result = try await group.next() else {
                 throw TimeoutError.cancelled
             }
@@ -278,19 +198,12 @@ public final class RequestTimeoutManager {
     }
 }
 
-// MARK: - Configuration
+public struct TimeoutConfiguration: Sendable {
 
-/// Configuration for timeout management
-/// Migrated from: TimeoutConfiguration.cs
-public struct TimeoutConfiguration {
-
-    /// Default timeout duration (in seconds)
     public let defaultTimeout: TimeInterval
 
-    /// Interval for checking timeouts (in seconds)
     public let checkInterval: TimeInterval
 
-    /// Whether to enable timeout tracking
     public let enabled: Bool
 
     public init(
@@ -303,24 +216,18 @@ public struct TimeoutConfiguration {
         self.enabled = enabled
     }
 
-    // MARK: - Presets
-
-    /// Default configuration (30s timeout, 1s check interval)
     public static let `default` = TimeoutConfiguration()
 
-    /// Short timeouts (10s timeout, 0.5s check interval)
     public static let short = TimeoutConfiguration(
         defaultTimeout: 10.0,
         checkInterval: 0.5
     )
 
-    /// Long timeouts (60s timeout, 2s check interval)
     public static let long = TimeoutConfiguration(
         defaultTimeout: 60.0,
         checkInterval: 2.0
     )
 
-    /// Disabled
     public static let disabled = TimeoutConfiguration(
         defaultTimeout: 0,
         checkInterval: 0,
@@ -328,9 +235,6 @@ public struct TimeoutConfiguration {
     )
 }
 
-// MARK: - Statistics
-
-/// Timeout statistics
 public struct TimeoutStatistics {
     public let activeTimeouts: Int
     public let totalTimeouts: Int
@@ -342,9 +246,6 @@ public struct TimeoutStatistics {
     }
 }
 
-// MARK: - Errors
-
-/// Timeout-related errors
 public enum TimeoutError: LocalizedError {
     case timeout(duration: TimeInterval)
     case cancelled

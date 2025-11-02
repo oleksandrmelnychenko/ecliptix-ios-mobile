@@ -1,28 +1,18 @@
-import SwiftUI
 import EcliptixCore
+import EcliptixNetworking
+import EcliptixSecurity
+import SwiftUI
 
-// MARK: - Sign In View (Modern Service-Based Architecture)
-/// Example showing how clean SwiftUI views are with service architecture
-/// Compare this to ViewModel approach - much simpler!
 struct SignInView: View {
-
-    // MARK: - Dependencies
     @State private var authService: AuthenticationService
-
-    // MARK: - Form State
     @State private var mobileNumber: String = ""
     @State private var secureKey: String = ""
-
-    // MARK: - Initialization
     init(authService: AuthenticationService) {
         self._authService = State(initialValue: authService)
     }
-
-    // MARK: - Body
     var body: some View {
         NavigationStack {
             VStack(spacing: 24) {
-                // Header
                 VStack(spacing: 8) {
                     Image(systemName: "lock.shield.fill")
                         .font(.system(size: 60))
@@ -34,16 +24,13 @@ struct SignInView: View {
                 }
                 .padding(.top, 40)
 
-                // Form Fields
                 VStack(spacing: 16) {
-                    // Mobile Number
                     TextField("Mobile Number", text: $mobileNumber)
                         .textContentType(.telephoneNumber)
                         .keyboardType(.phonePad)
                         .textFieldStyle(.roundedBorder)
                         .disabled(authService.isLoading)
 
-                    // Secure Key
                     SecureField("Secure Key", text: $secureKey)
                         .textContentType(.password)
                         .textFieldStyle(.roundedBorder)
@@ -51,7 +38,6 @@ struct SignInView: View {
                 }
                 .padding(.horizontal)
 
-                // Error Message
                 if let error = authService.errorMessage {
                     Text(error)
                         .font(.caption)
@@ -60,7 +46,6 @@ struct SignInView: View {
                         .padding(.horizontal)
                 }
 
-                // Sign In Button
                 Button {
                     Task {
                         await signIn()
@@ -83,7 +68,6 @@ struct SignInView: View {
                 .disabled(!canSignIn || authService.isLoading)
                 .padding(.horizontal)
 
-                // Registration Link
                 Button {
                     authService.currentStep = .registration
                 } label: {
@@ -99,40 +83,20 @@ struct SignInView: View {
             .navigationBarTitleDisplayMode(.inline)
         }
     }
-
-    // MARK: - Computed Properties
     private var canSignIn: Bool {
         !mobileNumber.isEmpty && !secureKey.isEmpty
     }
-
-    // MARK: - Actions
     private func signIn() async {
         let result = await authService.signIn(
             mobileNumber: mobileNumber,
             secureKey: secureKey
         )
 
-        // Navigation handled by observing authService.currentStep
         if case .success = result {
             Log.info("[SignInView] Sign in successful")
         }
     }
 }
-
-// MARK: - Preview
 #Preview {
-    // Example setup for preview
-    let networkProvider = NetworkProvider(
-        channelManager: GRPCChannelManager(configuration: .default),
-        retryPolicy: RetryPolicy()
-    )
-
-    let identityKeys = try! IdentityKeys.create(oneTimeKeyCount: 10).get()
-
-    let authService = AuthenticationService(
-        networkProvider: networkProvider,
-        identityKeys: identityKeys
-    )
-
-    return SignInView(authService: authService)
+    Text("SignInView Preview")
 }

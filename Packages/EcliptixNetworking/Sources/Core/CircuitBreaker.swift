@@ -1,63 +1,40 @@
-import Foundation
 import EcliptixCore
+import Foundation
 
-// MARK: - Circuit Breaker
-/// Implements the Circuit Breaker pattern to prevent cascading failures
-/// Migrated from: Ecliptix.Core/Services/Network/Resilience/CircuitBreaker.cs
-///
-/// States:
-/// - Closed: Normal operation, requests pass through
-/// - Open: Failure threshold exceeded, requests fail fast
-/// - Half-Open: Testing if service recovered, limited requests allowed
 @MainActor
 public final class CircuitBreaker {
 
-    // MARK: - State
-
-    /// Circuit breaker state
     public enum State: String {
-        case closed     // Normal operation
-        case open       // Failing fast
-        case halfOpen   // Testing recovery
+        case closed
+        case open
+        case halfOpen
     }
 
-    /// Current state of the circuit breaker
     private(set) var state: State = .closed
-
-    // MARK: - Configuration
 
     private let configuration: CircuitBreakerConfiguration
 
-    // MARK: - Metrics
-
-    /// Consecutive failure count
     private var consecutiveFailures: Int = 0
 
-    /// Consecutive success count (in half-open state)
     private var consecutiveSuccesses: Int = 0
 
-    /// Last state transition time
     private var lastStateTransition: Date = Date()
 
-    /// Total failures since last reset
     private var totalFailures: Int = 0
 
-    /// Total successes since last reset
     private var totalSuccesses: Int = 0
 
-    /// Connection-specific circuit breakers
     private var connectionCircuits: [UInt32: ConnectionCircuitState] = [:]
-    private let connectionsLock = NSLock()
+    private let circuitLock = NSLock()
 
-    // MARK: - Types
-
-    /// Per-connection circuit state
+    @MainActor
     private class ConnectionCircuitState {
         let connectId: UInt32
         var state: State
         var consecutiveFailures: Int
         var lastStateTransition: Date
         var lastFailureTime: Date?
+        private let stateLock = NSLock()
 
         init(connectId: UInt32) {
             self.connectId = connectId
@@ -65,52 +42,54 @@ public final class CircuitBreaker {
             self.consecutiveFailures = 0
             self.lastStateTransition = Date()
         }
-    }
 
-    // MARK: - Initialization
+        func atomicUpdate(_ update: (ConnectionCircuitState) -> Void) {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            update(self)
+        }
+
+        func atomicRead<T>(_ read: (ConnectionCircuitState) -> T) -> T {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return read(self)
+        }
+    }
 
     public init(configuration: CircuitBreakerConfiguration = .default) {
         self.configuration = configuration
     }
 
-    // MARK: - Execute with Circuit Breaker
-
-    /// Executes an operation with circuit breaker protection
-    /// Migrated from: ExecuteAsync()
     public func execute<T>(
         connectId: UInt32? = nil,
         operationName: String,
         operation: @escaping () async throws -> Result<T, NetworkFailure>
     ) async -> Result<T, NetworkFailure> {
 
-        // Check if circuit is open (global or connection-specific)
         if let connectId = connectId {
             if isCircuitOpen(connectId: connectId) {
-                Log.warning("[CircuitBreaker] 🔴 Circuit OPEN for connection \(connectId) - failing fast: \(operationName)")
+                Log.warning("[CircuitBreaker] [ERROR] Circuit OPEN for connection \(connectId) - failing fast: \(operationName)")
                 return .failure(NetworkFailure(
                     type: .dataCenterNotResponding,
-                    message: "Circuit breaker is open - service temporarily unavailable",
-                    shouldRetry: false
+                    message: "Circuit breaker is open - service temporarily unavailable"
                 ))
             }
         } else {
             if state == .open && !shouldAttemptReset() {
-                Log.warning("[CircuitBreaker] 🔴 Circuit OPEN globally - failing fast: \(operationName)")
+                Log.warning("[CircuitBreaker] [ERROR] Circuit OPEN globally - failing fast: \(operationName)")
                 return .failure(NetworkFailure(
                     type: .dataCenterNotResponding,
-                    message: "Circuit breaker is open - service temporarily unavailable",
-                    shouldRetry: false
+                    message: "Circuit breaker is open - service temporarily unavailable"
                 ))
             }
         }
 
-        // Execute operation
         do {
             let result = try await operation()
 
             switch result {
             case .success:
-                // Record success
+
                 if let connectId = connectId {
                     recordSuccess(connectId: connectId)
                 } else {
@@ -119,7 +98,7 @@ public final class CircuitBreaker {
                 return result
 
             case .failure(let error):
-                // Record failure
+
                 if let connectId = connectId {
                     recordFailure(connectId: connectId, error: error)
                 } else {
@@ -129,11 +108,10 @@ public final class CircuitBreaker {
             }
 
         } catch {
-            // Unexpected error
+
             let failure = NetworkFailure(
                 type: .unknown,
-                message: "Circuit breaker caught unexpected error: \(error.localizedDescription)",
-                shouldRetry: false
+                message: "Circuit breaker caught unexpected error: \(error.localizedDescription)"
             )
 
             if let connectId = connectId {
@@ -146,44 +124,37 @@ public final class CircuitBreaker {
         }
     }
 
-    // MARK: - State Management (Global)
-
-    /// Records a successful operation
-    /// Migrated from: RecordSuccess()
     private func recordSuccess() {
         totalSuccesses += 1
 
         switch state {
         case .halfOpen:
-            // Track consecutive successes in half-open state
+
             consecutiveSuccesses += 1
 
             if consecutiveSuccesses >= configuration.successThreshold {
-                // Success threshold met - close circuit
+
                 transitionTo(.closed)
                 consecutiveFailures = 0
                 consecutiveSuccesses = 0
-                Log.info("[CircuitBreaker] ✅ Circuit CLOSED - service recovered (\(consecutiveSuccesses) successes)")
+                Log.info("[CircuitBreaker] [OK] Circuit CLOSED - service recovered (\(consecutiveSuccesses) successes)")
             }
 
         case .closed:
-            // Reset failure count on success
+
             if consecutiveFailures > 0 {
                 consecutiveFailures = 0
             }
 
         case .open:
-            // Should not reach here, but reset if we do
+
             transitionTo(.halfOpen)
         }
     }
 
-    /// Records a failed operation
-    /// Migrated from: RecordFailure()
     private func recordFailure(error: NetworkFailure) {
         totalFailures += 1
 
-        // Only count retriable failures
         guard error.shouldRetry else {
             return
         }
@@ -192,25 +163,23 @@ public final class CircuitBreaker {
 
         switch state {
         case .closed:
-            // Check if failure threshold exceeded
             if consecutiveFailures >= configuration.failureThreshold {
                 transitionTo(.open)
-                Log.warning("[CircuitBreaker] 🔴 Circuit OPEN - failure threshold exceeded (\(consecutiveFailures) failures)")
+                Log.warning("[CircuitBreaker] [ERROR] Circuit OPEN - failure threshold exceeded (\(consecutiveFailures) failures)")
             }
 
         case .halfOpen:
-            // Any failure in half-open state reopens circuit
+
             transitionTo(.open)
             consecutiveSuccesses = 0
-            Log.warning("[CircuitBreaker] 🔴 Circuit RE-OPENED - service still failing")
+            Log.warning("[CircuitBreaker] [ERROR] Circuit RE-OPENED - service still failing")
 
         case .open:
-            // Already open, just track metric
+
             break
         }
     }
 
-    /// Transitions to a new state
     private func transitionTo(_ newState: State) {
         guard state != newState else { return }
 
@@ -218,16 +187,15 @@ public final class CircuitBreaker {
         state = newState
         lastStateTransition = Date()
 
-        Log.info("[CircuitBreaker] 🔄 State transition: \(oldState.rawValue) → \(newState.rawValue)")
+        Log.info("[CircuitBreaker]  State transition: \(oldState.rawValue) → \(newState.rawValue)")
     }
 
-    /// Checks if enough time has passed to attempt reset
     private func shouldAttemptReset() -> Bool {
         guard state == .open else { return false }
 
         let timeSinceOpen = Date().timeIntervalSince(lastStateTransition)
         if timeSinceOpen >= configuration.openStateDuration {
-            // Attempt reset to half-open
+
             transitionTo(.halfOpen)
             return true
         }
@@ -235,75 +203,78 @@ public final class CircuitBreaker {
         return false
     }
 
-    // MARK: - State Management (Per-Connection)
-
-    /// Records success for a specific connection
     private func recordSuccess(connectId: UInt32) {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
+        circuitLock.lock()
+        defer { circuitLock.unlock() }
 
         guard let circuit = connectionCircuits[connectId] else {
             return
         }
 
-        if circuit.state == .halfOpen {
-            // Close circuit after successful recovery test
-            circuit.state = .closed
-            circuit.consecutiveFailures = 0
-            circuit.lastStateTransition = Date()
-            Log.info("[CircuitBreaker] ✅ Circuit CLOSED for connection \(connectId)")
-        } else if circuit.state == .closed {
-            // Reset failure count
-            circuit.consecutiveFailures = 0
+        circuit.atomicUpdate { state in
+            if state.state == .halfOpen {
+                state.state = .closed
+                state.consecutiveFailures = 0
+                state.lastStateTransition = Date()
+                Log.info("[CircuitBreaker] [OK] Circuit CLOSED for connection \(connectId)")
+            } else if state.state == .closed {
+                state.consecutiveFailures = 0
+            }
         }
     }
 
-    /// Records failure for a specific connection
     private func recordFailure(connectId: UInt32, error: NetworkFailure) {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         guard error.shouldRetry else {
             return
         }
 
+        circuitLock.lock()
         let circuit = connectionCircuits[connectId] ?? ConnectionCircuitState(connectId: connectId)
-        connectionCircuits[connectId] = circuit
+        if connectionCircuits[connectId] == nil {
+            connectionCircuits[connectId] = circuit
+        }
+        circuitLock.unlock()
 
-        circuit.consecutiveFailures += 1
-        circuit.lastFailureTime = Date()
+        circuit.atomicUpdate { state in
+            state.consecutiveFailures += 1
+            state.lastFailureTime = Date()
+        }
 
-        if circuit.state == .closed && circuit.consecutiveFailures >= configuration.failureThreshold {
-            // Open circuit
-            circuit.state = .open
-            circuit.lastStateTransition = Date()
-            Log.warning("[CircuitBreaker] 🔴 Circuit OPEN for connection \(connectId) - \(circuit.consecutiveFailures) failures")
+        let shouldOpen = circuit.atomicRead { state in
+            state.state == .closed && state.consecutiveFailures >= configuration.failureThreshold
+        }
 
-        } else if circuit.state == .halfOpen {
-            // Re-open circuit
-            circuit.state = .open
-            circuit.lastStateTransition = Date()
-            Log.warning("[CircuitBreaker] 🔴 Circuit RE-OPENED for connection \(connectId)")
+        if shouldOpen {
+            circuit.atomicUpdate { state in
+                state.state = .open
+                state.lastStateTransition = Date()
+            }
+            let failures = circuit.atomicRead { $0.consecutiveFailures }
+            Log.warning("[CircuitBreaker] [ERROR] Circuit OPEN for connection \(connectId) - \(failures) failures")
+        } else {
+            let isHalfOpen = circuit.atomicRead { $0.state == .halfOpen }
+            if isHalfOpen {
+                circuit.atomicUpdate { state in
+                    state.state = .open
+                    state.lastStateTransition = Date()
+                }
+                Log.warning("[CircuitBreaker] [ERROR] Circuit RE-OPENED for connection \(connectId)")
+            }
         }
     }
 
-    /// Checks if circuit is open for a specific connection
     private func isCircuitOpen(connectId: UInt32) -> Bool {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         guard let circuit = connectionCircuits[connectId] else {
-            return false // No circuit = closed
+            return false
         }
 
         if circuit.state == .open {
-            // Check if enough time has passed to attempt reset
             let timeSinceOpen = Date().timeIntervalSince(circuit.lastStateTransition)
             if timeSinceOpen >= configuration.openStateDuration {
-                // Attempt reset to half-open
+
                 circuit.state = .halfOpen
                 circuit.lastStateTransition = Date()
-                Log.info("[CircuitBreaker] 🟡 Circuit HALF-OPEN for connection \(connectId) - testing recovery")
+                Log.info("[CircuitBreaker]  Circuit HALF-OPEN for connection \(connectId) - testing recovery")
                 return false
             }
             return true
@@ -312,17 +283,11 @@ public final class CircuitBreaker {
         return false
     }
 
-    // MARK: - Manual Control
-
-    /// Manually opens the circuit breaker
-    /// Migrated from: Trip()
     public func trip() {
         transitionTo(.open)
-        Log.warning("[CircuitBreaker] 🔴 Circuit manually TRIPPED")
+        Log.warning("[CircuitBreaker] [ERROR] Circuit manually TRIPPED")
     }
 
-    /// Manually closes the circuit breaker
-    /// Migrated from: Reset()
     public func reset() {
         transitionTo(.closed)
         consecutiveFailures = 0
@@ -330,30 +295,20 @@ public final class CircuitBreaker {
         totalFailures = 0
         totalSuccesses = 0
 
-        // Reset all connection circuits
-        connectionsLock.lock()
         connectionCircuits.removeAll()
-        connectionsLock.unlock()
 
-        Log.info("[CircuitBreaker] ✅ Circuit manually RESET")
+        Log.info("[CircuitBreaker] [OK] Circuit manually RESET")
     }
 
-    /// Resets circuit for a specific connection
     public func resetConnection(_ connectId: UInt32) {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         if let circuit = connectionCircuits[connectId] {
             circuit.state = .closed
             circuit.consecutiveFailures = 0
             circuit.lastStateTransition = Date()
-            Log.info("[CircuitBreaker] ✅ Circuit RESET for connection \(connectId)")
+            Log.info("[CircuitBreaker] [OK] Circuit RESET for connection \(connectId)")
         }
     }
 
-    // MARK: - Metrics
-
-    /// Returns current circuit breaker metrics
     public func getMetrics() -> CircuitBreakerMetrics {
         return CircuitBreakerMetrics(
             state: state,
@@ -365,11 +320,7 @@ public final class CircuitBreaker {
         )
     }
 
-    /// Returns metrics for a specific connection
     public func getConnectionMetrics(connectId: UInt32) -> ConnectionCircuitMetrics? {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         guard let circuit = connectionCircuits[connectId] else {
             return nil
         }
@@ -384,22 +335,14 @@ public final class CircuitBreaker {
     }
 }
 
-// MARK: - Configuration
+public struct CircuitBreakerConfiguration: Sendable {
 
-/// Configuration for circuit breaker behavior
-/// Migrated from: CircuitBreakerConfiguration.cs
-public struct CircuitBreakerConfiguration {
-
-    /// Number of consecutive failures before opening circuit
     public let failureThreshold: Int
 
-    /// Number of consecutive successes required to close circuit from half-open
     public let successThreshold: Int
 
-    /// Duration to keep circuit open before attempting half-open (in seconds)
     public let openStateDuration: TimeInterval
 
-    /// Whether to use per-connection circuit breakers
     public let usePerConnectionCircuits: Bool
 
     public init(
@@ -414,26 +357,20 @@ public struct CircuitBreakerConfiguration {
         self.usePerConnectionCircuits = usePerConnectionCircuits
     }
 
-    // MARK: - Presets
-
-    /// Default configuration (5 failures, 2 successes, 30s open duration)
     public static let `default` = CircuitBreakerConfiguration()
 
-    /// Aggressive configuration (3 failures, 1 success, 15s open duration)
     public static let aggressive = CircuitBreakerConfiguration(
         failureThreshold: 3,
         successThreshold: 1,
         openStateDuration: 15.0
     )
 
-    /// Conservative configuration (10 failures, 3 successes, 60s open duration)
     public static let conservative = CircuitBreakerConfiguration(
         failureThreshold: 10,
         successThreshold: 3,
         openStateDuration: 60.0
     )
 
-    /// Disabled (very high threshold)
     public static let disabled = CircuitBreakerConfiguration(
         failureThreshold: Int.max,
         successThreshold: 1,
@@ -442,9 +379,6 @@ public struct CircuitBreakerConfiguration {
     )
 }
 
-// MARK: - Metrics
-
-/// Circuit breaker metrics
 public struct CircuitBreakerMetrics {
     public let state: CircuitBreaker.State
     public let consecutiveFailures: Int
@@ -454,7 +388,6 @@ public struct CircuitBreakerMetrics {
     public let timeSinceLastTransition: TimeInterval
 }
 
-/// Per-connection circuit breaker metrics
 public struct ConnectionCircuitMetrics {
     public let connectId: UInt32
     public let state: CircuitBreaker.State

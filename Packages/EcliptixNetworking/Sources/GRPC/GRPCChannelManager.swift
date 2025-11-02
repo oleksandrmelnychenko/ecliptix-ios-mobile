@@ -1,13 +1,15 @@
+import EcliptixCore
 import Foundation
-import GRPC
+import GRPCCore
+import GRPCNIOTransportHTTP2
 import NIOCore
+import NIOHTTP2
 import NIOPosix
 import NIOSSL
-import EcliptixCore
 
-// MARK: - GRPC Channel Configuration
-/// Configuration for gRPC channels
-public struct GRPCChannelConfiguration {
+public typealias HTTP2Transport = HTTP2ClientTransport.Posix
+
+public struct GRPCChannelConfiguration: Sendable {
     public let host: String
     public let port: Int
     public let useTLS: Bool
@@ -41,146 +43,104 @@ public struct GRPCChannelConfiguration {
     }
 }
 
-// MARK: - GRPC Channel Manager
-/// Manages gRPC channel lifecycle
-/// Simplified migration from: C# gRPC channel management
+@MainActor
 public final class GRPCChannelManager {
-
-    // MARK: - Properties
     private let configuration: GRPCChannelConfiguration
-    private var channel: GRPCChannel?
-    private let eventLoopGroup: MultiThreadedEventLoopGroup
-    private var isDisposed = false
-    private let lock = NSLock()
+    private var clientPool: [GRPCClient<HTTP2Transport>] = []
+    private var currentPoolIndex: Int = 0
+    private let poolSize: Int
+    private var isShutdown = false
 
-    // MARK: - Initialization
-    public init(configuration: GRPCChannelConfiguration = .default) {
+    public init(configuration: GRPCChannelConfiguration = .default, poolSize: Int = 3) {
         self.configuration = configuration
-        self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        Log.info("GRPCChannelManager initialized for \(configuration.host):\(configuration.port)")
+        self.poolSize = min(max(poolSize, 1), 10)
+        Log.info("[GRPCChannelManager] Initialized with pool size \(self.poolSize) for \(configuration.host):\(configuration.port)")
     }
 
     deinit {
-        dispose()
+        if !isShutdown {
+            Log.warning("[GRPCChannelManager] Deallocated without explicit shutdown")
+        }
     }
 
-    // MARK: - Get Channel
-    /// Gets or creates a gRPC channel
-    public func getChannel() throws -> GRPCChannel {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard !isDisposed else {
-            throw NetworkError.connectionFailed("Channel manager disposed")
+    public func getClient() throws -> GRPCClient<HTTP2Transport> {
+        guard !isShutdown else {
+            throw GRPCChannelError.connectionFailed("Channel manager shut down")
         }
 
-        if let existingChannel = channel, !isChannelShutdown(existingChannel) {
-            return existingChannel
+        if clientPool.isEmpty {
+            try initializePool()
         }
 
-        // Create new channel
-        let newChannel = try createChannel()
-        channel = newChannel
-        return newChannel
+        let client = clientPool[currentPoolIndex]
+        currentPoolIndex = (currentPoolIndex + 1) % clientPool.count
+
+        return client
     }
 
-    // MARK: - Create Channel
-    private func createChannel() throws -> GRPCChannel {
-        let target = ConnectionTarget.host(configuration.host, port: configuration.port)
+    private func initializePool() throws {
+        Log.info("[GRPCChannelManager] Initializing connection pool with \(poolSize) clients")
 
-        var builder = ClientConnection.usingPlatformAppropriateTLS(for: eventLoopGroup)
-            .withConnectionBackoff(initial: .seconds(1), multiplier: 2.0, maximum: .seconds(30))
-            .withConnectionTimeout(minimum: .seconds(Int64(configuration.connectionTimeout)))
-            .withKeepalive(
-                ClientConnectionKeepalive(
-                    interval: .seconds(Int64(configuration.keepaliveInterval)),
-                    timeout: .seconds(Int64(configuration.keepaliveTimeout))
-                )
-            )
+        for i in 0..<poolSize {
+            let client = try createClient()
+            clientPool.append(client)
+            Log.debug("[GRPCChannelManager] Created pool client \(i + 1)/\(poolSize)")
+        }
 
-        // Configure TLS
+        Log.info("[GRPCChannelManager] [OK] Connection pool initialized with \(clientPool.count) clients")
+    }
+    private func createClient() throws -> GRPCClient<HTTP2Transport> {
+        let transportSecurity: HTTP2Transport.TransportSecurity
         if configuration.useTLS {
-            builder = builder.withTLS(certificateVerification: .fullVerification)
+            transportSecurity = .tls
         } else {
-            builder = builder.withTLS(certificateVerification: .none)
+            transportSecurity = .plaintext
         }
 
-        let connection = builder.connect(host: configuration.host, port: configuration.port)
+        let transport = try HTTP2Transport(
+            target: .dns(host: configuration.host, port: configuration.port),
+            transportSecurity: transportSecurity,
+            config: .defaults(
+                configure: { transportConfig in
+                    transportConfig.http2.targetWindowSize = 65535
+                    transportConfig.http2.maxFrameSize = 16384
 
-        Log.info("Created gRPC channel to \(configuration.host):\(configuration.port)")
-        return connection
+                    transportConfig.connection.keepalive = .init(
+                        time: .seconds(Int64(configuration.keepaliveInterval)),
+                        timeout: .seconds(Int64(configuration.keepaliveTimeout)),
+                        allowWithoutCalls: false
+                    )
+
+                    transportConfig.backoff = .defaults
+                }
+            )
+        )
+
+        let grpcClient = GRPCClient(transport: transport)
+
+        Log.info("[GRPCChannelManager] Created gRPC client to \(configuration.host):\(configuration.port)")
+        return grpcClient
     }
 
-    // MARK: - Check Channel Status
-    private func isChannelShutdown(_ channel: GRPCChannel) -> Bool {
-        // In grpc-swift, we check the connectivity state
-        // If it's shutdown or transitioning to shutdown, return true
-        return false // Simplified - in practice, check channel.connectivity.state
-    }
-
-    // MARK: - Shutdown Channel
-    /// Gracefully shuts down the channel
     public func shutdown() async {
-        lock.lock()
-        let channelToShutdown = channel
-        channel = nil
-        lock.unlock()
+        let clientsToShutdown = clientPool
+        clientPool.removeAll()
+        isShutdown = true
 
-        if let channelToShutdown = channelToShutdown {
-            do {
-                try await channelToShutdown.close().get()
-                Log.info("gRPC channel shut down gracefully")
-            } catch {
-                Log.warning("Error shutting down gRPC channel: \(error.localizedDescription)")
-            }
-        }
-    }
+        if !clientsToShutdown.isEmpty {
+            Log.info("[GRPCChannelManager] Shutting down \(clientsToShutdown.count) gRPC clients")
 
-    // MARK: - Dispose
-    public func dispose() {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard !isDisposed else { return }
-        isDisposed = true
-
-        Task {
-            await shutdown()
-
-            do {
-                try await eventLoopGroup.shutdownGracefully()
-                Log.info("Event loop group shut down")
-            } catch {
-                Log.error("Error shutting down event loop group: \(error.localizedDescription)")
-            }
+            Log.info("[GRPCChannelManager] [OK] All gRPC clients shut down")
         }
     }
 }
+public enum GRPCChannelError: Error, LocalizedError {
+    case connectionFailed(String)
 
-// MARK: - Call Options Factory
-/// Creates gRPC call options
-public struct GRPCCallOptionsFactory {
-
-    /// Creates call options with timeout
-    public static func createCallOptions(timeout: TimeInterval) -> CallOptions {
-        var callOptions = CallOptions()
-        callOptions.timeLimit = .timeout(.seconds(Int64(timeout)))
-        return callOptions
-    }
-
-    /// Creates call options with custom headers
-    public static func createCallOptions(
-        timeout: TimeInterval,
-        customHeaders: [String: String]
-    ) -> CallOptions {
-        var callOptions = CallOptions()
-        callOptions.timeLimit = .timeout(.seconds(Int64(timeout)))
-
-        // Add custom headers
-        for (key, value) in customHeaders {
-            callOptions.customMetadata.add(name: key, value: value)
+    public var errorDescription: String? {
+        switch self {
+        case .connectionFailed(let message):
+            return "gRPC connection failed: \(message)"
         }
-
-        return callOptions
     }
 }

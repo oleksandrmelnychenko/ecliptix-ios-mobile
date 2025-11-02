@@ -1,24 +1,17 @@
-import Foundation
 import Combine
 import EcliptixCore
+import Foundation
 
-// MARK: - Connection Health Monitor
-/// Monitors health of individual connections and provides health metrics
-/// Migrated from: Ecliptix.Core/Services/Network/Health/ConnectionHealthMonitor.cs
 @MainActor
 public final class ConnectionHealthMonitor {
 
-    // MARK: - Health State
-
-    /// Health status for a connection
     public enum HealthStatus: String {
-        case healthy        // No issues
-        case degraded       // Some failures, but functional
-        case unhealthy      // Frequent failures
-        case critical       // Unusable
+        case healthy
+        case degraded
+        case unhealthy
+        case critical
     }
 
-    /// Health information for a connection
     public struct ConnectionHealth {
         public let connectId: UInt32
         public let status: HealthStatus
@@ -43,23 +36,14 @@ public final class ConnectionHealthMonitor {
         }
     }
 
-    // MARK: - Properties
-
     private let configuration: HealthMonitorConfiguration
 
-    /// Health tracking per connection
     private var connectionHealth: [UInt32: ConnectionHealthTracker] = [:]
-    private let healthLock = NSLock()
 
-    /// Publisher for health status changes
     public let healthStatusPublisher = PassthroughSubject<ConnectionHealth, Never>()
 
-    /// Cleanup timer
-    private var cleanupTimer: Timer?
+    nonisolated(unsafe) private var cleanupTimer: Timer?
 
-    // MARK: - Health Tracker
-
-    /// Internal tracker for connection health
     private class ConnectionHealthTracker {
         let connectId: UInt32
         var status: HealthStatus = .healthy
@@ -101,7 +85,7 @@ public final class ConnectionHealthMonitor {
         }
 
         func updateStatus(config: HealthMonitorConfiguration) {
-            // Determine health status based on metrics
+
             if consecutiveFailures >= config.criticalConsecutiveFailures {
                 status = .critical
             } else if consecutiveFailures >= config.unhealthyConsecutiveFailures {
@@ -130,12 +114,9 @@ public final class ConnectionHealthMonitor {
         }
     }
 
-    // MARK: - Initialization
-
     public init(configuration: HealthMonitorConfiguration = .default) {
         self.configuration = configuration
 
-        // Start cleanup timer
         startCleanupTimer()
     }
 
@@ -143,14 +124,7 @@ public final class ConnectionHealthMonitor {
         cleanupTimer?.invalidate()
     }
 
-    // MARK: - Health Tracking
-
-    /// Records a successful request
-    /// Migrated from: RecordSuccess()
     public func recordSuccess(connectId: UInt32, latency: TimeInterval) {
-        healthLock.lock()
-        defer { healthLock.unlock() }
-
         let tracker = getOrCreateTracker(connectId: connectId)
 
         tracker.successCount += 1
@@ -163,17 +137,12 @@ public final class ConnectionHealthMonitor {
 
         if previousStatus != tracker.status {
             let health = tracker.toConnectionHealth()
-            Log.info("[HealthMonitor] 📊 Connection \(connectId) status: \(previousStatus.rawValue) → \(tracker.status.rawValue)")
+            Log.info("[HealthMonitor]  Connection \(connectId) status: \(previousStatus.rawValue) → \(tracker.status.rawValue)")
             healthStatusPublisher.send(health)
         }
     }
 
-    /// Records a failed request
-    /// Migrated from: RecordFailure()
     public func recordFailure(connectId: UInt32, error: NetworkFailure) {
-        healthLock.lock()
-        defer { healthLock.unlock() }
-
         let tracker = getOrCreateTracker(connectId: connectId)
 
         tracker.failureCount += 1
@@ -185,60 +154,56 @@ public final class ConnectionHealthMonitor {
 
         if previousStatus != tracker.status {
             let health = tracker.toConnectionHealth()
-            Log.warning("[HealthMonitor] 📊 Connection \(connectId) status: \(previousStatus.rawValue) → \(tracker.status.rawValue)")
+            Log.warning("[HealthMonitor]  Connection \(connectId) status: \(previousStatus.rawValue) → \(tracker.status.rawValue)")
             healthStatusPublisher.send(health)
         }
     }
 
-    /// Gets health status for a connection
-    /// Migrated from: GetHealthStatus()
     public func getHealth(connectId: UInt32) -> ConnectionHealth? {
-        healthLock.lock()
-        defer { healthLock.unlock() }
-
         return connectionHealth[connectId]?.toConnectionHealth()
     }
 
-    /// Gets health status for all connections
     public func getAllHealth() -> [ConnectionHealth] {
-        healthLock.lock()
-        defer { healthLock.unlock() }
-
         return connectionHealth.values.map { $0.toConnectionHealth() }
     }
 
-    /// Checks if connection is healthy
     public func isHealthy(connectId: UInt32) -> Bool {
-        healthLock.lock()
-        defer { healthLock.unlock() }
-
         guard let tracker = connectionHealth[connectId] else {
-            return true // Unknown connection = assumed healthy
+            return true
         }
 
         return tracker.status == .healthy
     }
 
-    /// Resets health tracking for a connection
-    /// Migrated from: ResetHealth()
+    public func isConnectionHealthy(connectId: UInt32) -> Bool {
+        return isHealthy(connectId: connectId)
+    }
+
+    public func markConnectionHealthy(connectId: UInt32) {
+        guard let tracker = connectionHealth[connectId] else {
+            return
+        }
+
+        tracker.consecutiveFailures = 0
+        let previousStatus = tracker.status
+        tracker.updateStatus(config: configuration)
+
+        if previousStatus != tracker.status {
+            let health = tracker.toConnectionHealth()
+            Log.info("[HealthMonitor] [OK] Connection \(connectId) marked healthy: \(previousStatus.rawValue) → \(tracker.status.rawValue)")
+            healthStatusPublisher.send(health)
+        }
+    }
+
     public func resetHealth(connectId: UInt32) {
-        healthLock.lock()
-        defer { healthLock.unlock() }
-
         connectionHealth.removeValue(forKey: connectId)
-        Log.info("[HealthMonitor] 🔄 Reset health for connection \(connectId)")
+        Log.info("[HealthMonitor]  Reset health for connection \(connectId)")
     }
 
-    /// Resets all health tracking
     public func resetAllHealth() {
-        healthLock.lock()
-        defer { healthLock.unlock() }
-
         connectionHealth.removeAll()
-        Log.info("[HealthMonitor] 🔄 Reset all connection health")
+        Log.info("[HealthMonitor]  Reset all connection health")
     }
-
-    // MARK: - Helpers
 
     private func getOrCreateTracker(connectId: UInt32) -> ConnectionHealthTracker {
         if let tracker = connectionHealth[connectId] {
@@ -250,26 +215,23 @@ public final class ConnectionHealthMonitor {
         return tracker
     }
 
-    // MARK: - Cleanup
-
     private func startCleanupTimer() {
         cleanupTimer = Timer.scheduledTimer(
             withTimeInterval: configuration.cleanupInterval,
             repeats: true
         ) { [weak self] _ in
-            self?.cleanupStaleConnections()
+            Task { @MainActor in
+                self?.cleanupStaleConnections()
+            }
         }
     }
 
     private func cleanupStaleConnections() {
-        healthLock.lock()
-        defer { healthLock.unlock() }
-
         let cutoff = Date().addingTimeInterval(-configuration.staleConnectionTimeout)
         var removed = 0
 
         for (connectId, tracker) in connectionHealth {
-            // Remove if no activity for stale timeout
+
             let lastActivity = max(tracker.lastSuccessTime ?? tracker.firstTrackingTime,
                                    tracker.lastFailureTime ?? tracker.firstTrackingTime)
 
@@ -280,17 +242,11 @@ public final class ConnectionHealthMonitor {
         }
 
         if removed > 0 {
-            Log.info("[HealthMonitor] 🧹 Cleaned up \(removed) stale connections")
+            Log.info("[HealthMonitor]  Cleaned up \(removed) stale connections")
         }
     }
 
-    // MARK: - Statistics
-
-    /// Returns overall health statistics
     public func getStatistics() -> HealthStatistics {
-        healthLock.lock()
-        defer { healthLock.unlock() }
-
         let allHealth = connectionHealth.values.map { $0.toConnectionHealth() }
 
         let healthy = allHealth.filter { $0.status == .healthy }.count
@@ -317,28 +273,18 @@ public final class ConnectionHealthMonitor {
     }
 }
 
-// MARK: - Configuration
+public struct HealthMonitorConfiguration: Sendable {
 
-/// Configuration for health monitoring
-/// Migrated from: HealthMonitorConfiguration.cs
-public struct HealthMonitorConfiguration {
-
-    /// Success rate threshold for degraded status (e.g., 0.9 = 90%)
     public let degradedSuccessRateThreshold: Double
 
-    /// Latency threshold for degraded status (in seconds)
     public let degradedLatencyThreshold: TimeInterval
 
-    /// Consecutive failures for unhealthy status
     public let unhealthyConsecutiveFailures: Int
 
-    /// Consecutive failures for critical status
     public let criticalConsecutiveFailures: Int
 
-    /// Cleanup interval for stale connections (in seconds)
     public let cleanupInterval: TimeInterval
 
-    /// Timeout for considering a connection stale (in seconds)
     public let staleConnectionTimeout: TimeInterval
 
     public init(
@@ -357,12 +303,8 @@ public struct HealthMonitorConfiguration {
         self.staleConnectionTimeout = staleConnectionTimeout
     }
 
-    // MARK: - Presets
-
-    /// Default configuration
     public static let `default` = HealthMonitorConfiguration()
 
-    /// Strict configuration (lower thresholds)
     public static let strict = HealthMonitorConfiguration(
         degradedSuccessRateThreshold: 0.95,
         degradedLatencyThreshold: 3.0,
@@ -370,7 +312,6 @@ public struct HealthMonitorConfiguration {
         criticalConsecutiveFailures: 3
     )
 
-    /// Relaxed configuration (higher thresholds)
     public static let relaxed = HealthMonitorConfiguration(
         degradedSuccessRateThreshold: 0.70,
         degradedLatencyThreshold: 10.0,
@@ -379,9 +320,6 @@ public struct HealthMonitorConfiguration {
     )
 }
 
-// MARK: - Statistics
-
-/// Overall health statistics
 public struct HealthStatistics {
     public let totalConnections: Int
     public let healthyConnections: Int

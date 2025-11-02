@@ -1,11 +1,10 @@
-import XCTest
 import Crypto
+import XCTest
+
 @testable import EcliptixSecurity
 @testable import EcliptixCore
 
 final class EnvelopeBuilderTests: XCTestCase {
-
-    // MARK: - Test Create Envelope Metadata
     func testCreateEnvelopeMetadata() {
         let requestId: UInt32 = 12345
         let nonce = CryptographicHelpers.generateRandomNonce()
@@ -22,12 +21,9 @@ final class EnvelopeBuilderTests: XCTestCase {
         XCTAssertEqual(metadata.nonce, nonce)
         XCTAssertEqual(metadata.ratchetIndex, ratchetIndex)
         XCTAssertEqual(metadata.envelopeType, .request)
-        XCTAssertEqual(metadata.channelKeyId.count, 16) // Should be 16 bytes
+        XCTAssertEqual(metadata.channelKeyId.count, 16)
     }
-
-    // MARK: - Test Parse Result Code
     func testParseResultCode() {
-        // Create result code bytes (Int32 in little endian)
         var resultCodeValue = Int32(EnvelopeResultCode.success.rawValue)
         var resultCodeBytes = Data(count: 4)
         resultCodeBytes.withUnsafeMutableBytes { buffer in
@@ -41,8 +37,6 @@ final class EnvelopeBuilderTests: XCTestCase {
             XCTAssertEqual(code, .success)
         }
     }
-
-    // MARK: - Test Extract Request ID
     func testExtractRequestId() {
         let envelopeId = "99999"
         let requestId = EnvelopeBuilder.extractRequestId(from: envelopeId)
@@ -54,13 +48,9 @@ final class EnvelopeBuilderTests: XCTestCase {
         let envelopeId = "invalid"
         let requestId = EnvelopeBuilder.extractRequestId(from: envelopeId)
 
-        // Should return a random UInt32
         XCTAssertGreaterThan(requestId, 0)
     }
-
-    // MARK: - Test Metadata Encryption/Decryption
     func testMetadataEncryptionDecryption() throws {
-        // Create test metadata
         let metadata = EnvelopeBuilder.createEnvelopeMetadata(
             requestId: 123,
             nonce: CryptographicHelpers.generateRandomNonce(),
@@ -68,12 +58,10 @@ final class EnvelopeBuilderTests: XCTestCase {
             envelopeType: .request
         )
 
-        // Generate encryption key and nonce
         let headerKey = CryptographicHelpers.generateRandomBytes(count: CryptographicConstants.aesKeySize)
         let headerNonce = CryptographicHelpers.generateRandomNonce()
         let associatedData = Data("test-associated-data".utf8)
 
-        // Encrypt metadata
         let encryptResult = EnvelopeBuilder.encryptMetadata(
             metadata: metadata,
             headerEncryptionKey: headerKey,
@@ -87,10 +75,8 @@ final class EnvelopeBuilderTests: XCTestCase {
             return
         }
 
-        // Verify encrypted data has correct size (ciphertext + 16-byte tag)
         XCTAssertGreaterThan(encryptedMetadata.count, 16)
 
-        // Decrypt metadata
         let decryptResult = EnvelopeBuilder.decryptMetadata(
             encryptedMetadata: encryptedMetadata,
             headerEncryptionKey: headerKey,
@@ -104,14 +90,11 @@ final class EnvelopeBuilderTests: XCTestCase {
             return
         }
 
-        // Verify decrypted metadata matches original
         XCTAssertEqual(decryptedMetadata.envelopeId, metadata.envelopeId)
         XCTAssertEqual(decryptedMetadata.ratchetIndex, metadata.ratchetIndex)
         XCTAssertEqual(decryptedMetadata.envelopeType, metadata.envelopeType)
         XCTAssertEqual(decryptedMetadata.nonce, metadata.nonce)
     }
-
-    // MARK: - Test Metadata Decryption with Wrong Key
     func testMetadataDecryptionWithWrongKey() throws {
         let metadata = EnvelopeBuilder.createEnvelopeMetadata(
             requestId: 123,
@@ -124,7 +107,6 @@ final class EnvelopeBuilderTests: XCTestCase {
         let headerNonce = CryptographicHelpers.generateRandomNonce()
         let associatedData = Data("test-associated-data".utf8)
 
-        // Encrypt
         let encryptResult = EnvelopeBuilder.encryptMetadata(
             metadata: metadata,
             headerEncryptionKey: headerKey,
@@ -137,7 +119,6 @@ final class EnvelopeBuilderTests: XCTestCase {
             return
         }
 
-        // Try to decrypt with wrong key
         let wrongKey = CryptographicHelpers.generateRandomBytes(count: CryptographicConstants.aesKeySize)
 
         let decryptResult = EnvelopeBuilder.decryptMetadata(
@@ -147,11 +128,8 @@ final class EnvelopeBuilderTests: XCTestCase {
             associatedData: associatedData
         )
 
-        // Should fail
         XCTAssertTrue(decryptResult.isFailure)
     }
-
-    // MARK: - Test Create Secure Envelope
     func testCreateSecureEnvelope() throws {
         let metadata = EnvelopeBuilder.createEnvelopeMetadata(
             requestId: 456,
@@ -174,7 +152,6 @@ final class EnvelopeBuilderTests: XCTestCase {
         XCTAssertEqual(envelope.headerNonce, headerNonce)
         XCTAssertEqual(envelope.resultCode.count, 4)
 
-        // Verify result code is success (0)
         let resultCodeValue = envelope.resultCode.withUnsafeBytes { buffer in
             buffer.load(as: Int32.self).littleEndian
         }

@@ -1,0 +1,4 @@
+module ecliptix_client {
+  header "ecliptix_client.h"
+  export *
+}

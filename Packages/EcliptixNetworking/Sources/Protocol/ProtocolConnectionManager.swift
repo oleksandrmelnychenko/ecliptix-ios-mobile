@@ -1,22 +1,12 @@
-import Foundation
 import EcliptixCore
 import EcliptixSecurity
+import Foundation
 
-// MARK: - Protocol Connection Manager
-/// Manages protocol sessions (DoubleRatchet + X3DH) by connection ID
-/// Migrated from: NetworkProvider connection management (ConcurrentDictionary<uint, EcliptixProtocolSystem>)
-public final class ProtocolConnectionManager {
+public actor ProtocolConnectionManager {
 
-    // MARK: - Properties
+    internal var connections: [UInt32: ProtocolSession] = [:]
 
-    /// Active protocol connections indexed by connectId
-    private var connections: [UInt32: ProtocolSession] = [:]
-    private let connectionsLock = NSLock()
-
-    // MARK: - Types
-
-    /// Represents a protocol session with Double Ratchet
-    public struct ProtocolSession {
+    public struct ProtocolSession: @unchecked Sendable {
         public let connectId: UInt32
         public let identityKeys: IdentityKeys
         public var doubleRatchet: DoubleRatchet?
@@ -30,18 +20,13 @@ public final class ProtocolConnectionManager {
         }
     }
 
-    // MARK: - Initialization
+    internal let x3dhService: X3DHKeyExchange
 
-    public init() {}
+    public init(x3dhService: X3DHKeyExchange = X3DHKeyExchange()) {
+        self.x3dhService = x3dhService
+    }
 
-    // MARK: - Connection Management
-
-    /// Adds a new protocol session
-    /// Migrated from: InitiateEcliptixProtocolSystem()
     public func addConnection(connectId: UInt32, identityKeys: IdentityKeys, doubleRatchet: DoubleRatchet? = nil) {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         let session = ProtocolSession(
             connectId: connectId,
             identityKeys: identityKeys,
@@ -52,19 +37,11 @@ public final class ProtocolConnectionManager {
         Log.info("[ProtocolConnectionManager] Added connection \(connectId)")
     }
 
-    /// Gets a protocol session by connectId
     public func getConnection(_ connectId: UInt32) -> ProtocolSession? {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         return connections[connectId]
     }
 
-    /// Updates an existing protocol session
     public func updateConnection(_ connectId: UInt32, doubleRatchet: DoubleRatchet) {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         guard var session = connections[connectId] else {
             Log.warning("[ProtocolConnectionManager] Cannot update non-existent connection \(connectId)")
             return
@@ -76,122 +53,366 @@ public final class ProtocolConnectionManager {
         Log.debug("[ProtocolConnectionManager] Updated connection \(connectId)")
     }
 
-    /// Removes a protocol session
-    /// Migrated from: CleanupStreamProtocolAsync()
     public func removeConnection(_ connectId: UInt32) {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         connections.removeValue(forKey: connectId)
         Log.info("[ProtocolConnectionManager] Removed connection \(connectId)")
     }
 
-    /// Checks if a connection exists
     public func hasConnection(_ connectId: UInt32) -> Bool {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         return connections[connectId] != nil
     }
 
-    /// Gets all active connection IDs
     public func getAllConnectionIds() -> [UInt32] {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         return Array(connections.keys)
     }
 
-    /// Removes all connections
     public func removeAll() {
-        connectionsLock.lock()
-        defer { connectionsLock.unlock() }
-
         let count = connections.count
         connections.removeAll()
 
         Log.info("[ProtocolConnectionManager] Removed all \(count) connections")
     }
 
-    // MARK: - Encryption/Decryption
-
-    /// Encrypts plain data using the protocol session
-    /// Migrated from: protocolSystem.ProduceOutboundEnvelope(plainBuffer)
     public func encryptOutbound(_ connectId: UInt32, plainData: Data) -> Result<SecureEnvelope, ProtocolFailure> {
-        connectionsLock.lock()
         guard var session = connections[connectId] else {
-            connectionsLock.unlock()
             return .failure(.connectionNotFound("No protocol connection for connectId: \(connectId)"))
         }
-        connectionsLock.unlock()
 
-        guard var ratchet = session.doubleRatchet else {
+        guard let ratchet = session.doubleRatchet else {
             return .failure(.noDoubleRatchet("Double Ratchet not initialized for connectId: \(connectId)"))
         }
 
         Log.info("[ProtocolConnectionManager] Encrypting outbound for connection \(connectId), plainDataSize: \(plainData.count)")
 
-        // Log ratchet state before encryption
-        Log.debug("[ProtocolConnectionManager] Before encryption - Sending: \(ratchet.sendingChainIndex), Receiving: \(ratchet.receivingChainIndex)")
+        do {
+            let sendingIndex = try ratchet.getSendingChainIndex()
+            let receivingIndex = try ratchet.getReceivingChainIndex()
+            Log.debug("[ProtocolConnectionManager] Before encryption - Sending: \(sendingIndex), Receiving: \(receivingIndex)")
+        } catch {
+            Log.warning("[ProtocolConnectionManager] Failed to get chain indices: \(error.localizedDescription)")
+        }
 
-        // Encrypt with Double Ratchet
-        let result = ratchet.encryptMessage(plaintext: plainData, associatedData: Data())
+        guard case .success(let (ratchetKey, includeDhKey, dhPublicKey)) = ratchet.prepareNextSendMessage() else {
+            return .failure(.generic("Failed to prepare next send message"))
+        }
 
-        // Update session with new ratchet state
-        connectionsLock.lock()
+        var messageKey: Data?
+        var headerKey: Data?
+        do {
+            try ratchetKey.withKeyMaterial { keyMaterial in
+
+                let msgKey = try HKDFKeyDerivation.deriveKey(
+                    inputKeyMaterial: keyMaterial,
+                    salt: nil,
+                    info: Data(CryptographicConstants.msgInfo),
+                    outputByteCount: CryptographicConstants.aesKeySize
+                )
+                messageKey = msgKey
+
+                let hdrKey = try HKDFKeyDerivation.deriveKey(
+                    inputKeyMaterial: keyMaterial,
+                    salt: nil,
+                    info: Data("header-enc".utf8),
+                    outputByteCount: CryptographicConstants.aesKeySize
+                )
+                headerKey = hdrKey
+            }
+        } catch {
+            return .failure(.generic("Failed to derive keys: \(error.localizedDescription)"))
+        }
+
+        guard let msgKey = messageKey, let hdrKey = headerKey else {
+            return .failure(.generic("Failed to execute key derivation"))
+        }
+
+        let messageNonce = CryptographicHelpers.generateRandomNonce(size: CryptographicConstants.aesGcmNonceSize)
+        let headerNonce = CryptographicHelpers.generateRandomNonce(size: CryptographicConstants.aesGcmNonceSize)
+
+        let ratchetIndex: UInt32
+        do {
+            ratchetIndex = try ratchet.getSendingChainIndex()
+        } catch {
+            return .failure(.generic("Failed to get sending chain index: \(error.localizedDescription)"))
+        }
+
+        let requestId: UInt32 = UInt32(Date().timeIntervalSince1970 * 1000) % UInt32.max
+
+        let associatedData = Data()
+        let envelopeResult = EnvelopeBuilder.createRequestEnvelope(
+            requestId: requestId,
+            payload: plainData,
+            messageKey: msgKey,
+            headerKey: hdrKey,
+            nonce: messageNonce,
+            headerNonce: headerNonce,
+            ratchetIndex: ratchetIndex,
+            channelKeyId: nil,
+            dhPublicKey: includeDhKey ? dhPublicKey : nil,
+            associatedData: associatedData
+        )
+
+        guard case .success(let envelope) = envelopeResult else {
+            if case .failure(let error) = envelopeResult {
+                return .failure(error)
+            }
+            return .failure(.generic("Failed to create request envelope"))
+        }
+
         session.doubleRatchet = ratchet
         connections[connectId] = session
-        connectionsLock.unlock()
 
-        switch result {
-        case .success(let envelope):
-            Log.info("[ProtocolConnectionManager] Encryption succeeded for connection \(connectId)")
-            Log.debug("[ProtocolConnectionManager] After encryption - Sending: \(ratchet.sendingChainIndex)")
-            return .success(envelope)
+        Log.info("[ProtocolConnectionManager] Successfully encrypted outbound for connection \(connectId)")
 
-        case .failure(let error):
-            Log.error("[ProtocolConnectionManager] Encryption failed for connection \(connectId): \(error.message)")
-            return .failure(error)
-        }
+        return .success(envelope)
     }
 
-    /// Decrypts inbound SecureEnvelope using the protocol session
-    /// Migrated from: protocolSystem.ProcessInboundEnvelope(inboundPayload)
     public func decryptInbound(_ connectId: UInt32, envelope: SecureEnvelope) -> Result<Data, ProtocolFailure> {
-        connectionsLock.lock()
         guard var session = connections[connectId] else {
-            connectionsLock.unlock()
             return .failure(.connectionNotFound("No protocol connection for connectId: \(connectId)"))
         }
-        connectionsLock.unlock()
 
-        guard var ratchet = session.doubleRatchet else {
+        guard let ratchet = session.doubleRatchet else {
             return .failure(.noDoubleRatchet("Double Ratchet not initialized for connectId: \(connectId)"))
         }
 
         Log.info("[ProtocolConnectionManager] Decrypting inbound for connection \(connectId)")
 
-        // Log ratchet state before decryption
-        Log.debug("[ProtocolConnectionManager] Before decryption - Sending: \(ratchet.sendingChainIndex), Receiving: \(ratchet.receivingChainIndex)")
+        do {
+            let sendingIndex = try ratchet.getSendingChainIndex()
+            let receivingIndex = try ratchet.getReceivingChainIndex()
+            Log.debug("[ProtocolConnectionManager] Before decryption - Sending: \(sendingIndex), Receiving: \(receivingIndex)")
+        } catch {
+            Log.warning("[ProtocolConnectionManager] Failed to get chain indices: \(error.localizedDescription)")
+        }
 
-        // Decrypt with Double Ratchet
-        let result = ratchet.decryptMessage(envelope: envelope, associatedData: Data())
+        guard case .success(let metadata) = EnvelopeBuilder.parseEnvelopeMetadata(from: envelope.metaData) else {
+            return .failure(.decode("Failed to parse envelope metadata"))
+        }
 
-        // Update session with new ratchet state
-        connectionsLock.lock()
+        let receivedIndex = UInt32(metadata.ratchetIndex)
+
+        guard case .success(let ratchetKey) = ratchet.processReceivedMessage(receivedIndex: receivedIndex) else {
+            return .failure(.generic("Failed to process received message at index \(receivedIndex)"))
+        }
+
+        var messageKey: Data?
+        var headerKey: Data?
+        do {
+            try ratchetKey.withKeyMaterial { keyMaterial in
+
+                let msgKey = try HKDFKeyDerivation.deriveKey(
+                    inputKeyMaterial: keyMaterial,
+                    salt: nil,
+                    info: Data(CryptographicConstants.msgInfo),
+                    outputByteCount: CryptographicConstants.aesKeySize
+                )
+                messageKey = msgKey
+
+                let hdrKey = try HKDFKeyDerivation.deriveKey(
+                    inputKeyMaterial: keyMaterial,
+                    salt: nil,
+                    info: Data("header-enc".utf8),
+                    outputByteCount: CryptographicConstants.aesKeySize
+                )
+                headerKey = hdrKey
+            }
+        } catch {
+            return .failure(.generic("Failed to derive keys: \(error.localizedDescription)"))
+        }
+
+        guard let msgKey = messageKey, let hdrKey = headerKey else {
+            return .failure(.generic("Failed to execute key derivation"))
+        }
+
+        let associatedData = Data()
+        let decryptResult = EnvelopeBuilder.decryptResponseEnvelope(
+            envelope: envelope,
+            messageKey: msgKey,
+            headerKey: hdrKey,
+            associatedData: associatedData
+        )
+
+        guard case .success(let (_, payload, resultCode)) = decryptResult else {
+            if case .failure(let error) = decryptResult {
+                return .failure(error)
+            }
+            return .failure(.generic("Failed to decrypt response envelope"))
+        }
+
+        if resultCode != .success {
+            Log.warning("[ProtocolConnectionManager] Envelope result code indicates error: \(resultCode)")
+        }
+
         session.doubleRatchet = ratchet
         connections[connectId] = session
-        connectionsLock.unlock()
 
-        switch result {
-        case .success(let plaintext):
-            Log.info("[ProtocolConnectionManager] Decryption succeeded for connection \(connectId), plaintextSize: \(plaintext.count)")
-            Log.debug("[ProtocolConnectionManager] After decryption - Receiving: \(ratchet.receivingChainIndex)")
-            return .success(plaintext)
+        Log.info("[ProtocolConnectionManager] Successfully decrypted inbound for connection \(connectId), payloadSize: \(payload.count)")
 
-        case .failure(let error):
-            Log.error("[ProtocolConnectionManager] Decryption failed for connection \(connectId): \(error.message)")
-            return .failure(error)
+        return .success(payload)
+    }
+
+    func establishSecureChannel(connectId: UInt32) async throws -> Data {
+        Log.info("[ProtocolConnectionManager] Establishing secure channel - ConnectId: \(connectId)")
+
+        let bundle = try x3dhService.generatePreKeyBundle()
+
+        Log.info("[ProtocolConnectionManager] Generated pre-key bundle")
+
+        let serverBundle = X3DHPublicKeyBundle(
+            identityPublicKey: bundle.identityPublicKey,
+            signedPreKeyId: bundle.signedPreKeyId,
+            signedPreKeyPublicKey: bundle.signedPreKeyPublicKey,
+            signedPreKeySignature: bundle.signedPreKeySignature,
+            ephemeralPublicKey: bundle.ephemeralPublicKey
+        )
+
+        let sharedSecret = try x3dhService.performInitiatorKeyAgreement(
+            bobsBundle: serverBundle,
+            aliceIdentityPrivate: bundle.identityPrivateKey,
+            aliceEphemeralPrivate: bundle.ephemeralPrivateKey
+        )
+
+        Log.info("[X3DH] Key agreement successful, shared secret length: \(sharedSecret.count)")
+
+        let (rootKey, sendingChainKey, _) = try x3dhService.deriveInitialKeys(from: sharedSecret)
+
+        Log.info("[X3DH] Derived initial keys - Root key, Sending chain, Receiving chain")
+
+        let identityKeys = try IdentityKeys.create(oneTimeKeyCount: 10)
+
+        Log.info("[ProtocolConnectionManager] Initializing DoubleRatchet with X3DH-derived keys")
+
+        let ratchetResult = ProtocolConnection.create(
+            connectionId: connectId,
+            isInitiator: true,
+            initialRootKey: rootKey,
+            initialChainKey: sendingChainKey,
+            ratchetConfig: .default
+        )
+
+        guard case .success(let doubleRatchet) = ratchetResult else {
+            if case .failure(let error) = ratchetResult {
+                throw error
+            }
+            throw ProtocolFailure.generic("Failed to initialize DoubleRatchet")
         }
+
+        Log.info("[ProtocolConnectionManager] [OK] DoubleRatchet initialized successfully")
+
+        let session = ProtocolSession(
+            connectId: connectId,
+            identityKeys: identityKeys,
+            doubleRatchet: doubleRatchet
+        )
+
+        connections[connectId] = session
+
+        Log.info("[ProtocolConnectionManager] [OK] Secure channel established - ConnectId: \(connectId)")
+
+        return try serializeSessionState(session)
+    }
+
+    func restoreConnection(
+        connectId: UInt32,
+        stateData: Data,
+        membershipId: UUID
+    ) async throws {
+        Log.info("[ProtocolConnectionManager] Restoring connection - ConnectId: \(connectId), DataSize: \(stateData.count)")
+
+        let decoder = PropertyListDecoder()
+        let sessionState = try decoder.decode(ProtocolSessionState.self, from: stateData)
+
+        guard sessionState.connectId == connectId else {
+            throw ProtocolFailure.generic("ConnectId mismatch in session state: expected \(connectId), got \(sessionState.connectId)")
+        }
+
+        let identityKeys = try IdentityKeys.fromProtoState(sessionState.identityKeysState)
+        Log.info("[ProtocolConnectionManager] [OK] Identity keys restored")
+
+        var doubleRatchet: DoubleRatchet? = nil
+        if let ratchetState = sessionState.ratchetState {
+            guard case .success(let ratchet) = ProtocolConnection.fromProtoState(
+                connectionId: connectId,
+                state: ratchetState,
+                ratchetConfig: .default
+            ) else {
+                throw ProtocolFailure.generic("Failed to restore DoubleRatchet from state")
+            }
+            doubleRatchet = ratchet
+            Log.info("[ProtocolConnectionManager] [OK] DoubleRatchet restored")
+        }
+
+        let session = ProtocolSession(
+            connectId: connectId,
+            identityKeys: identityKeys,
+            doubleRatchet: doubleRatchet
+        )
+
+        connections[connectId] = session
+
+        Log.info("[ProtocolConnectionManager] [OK] Connection restored successfully - ConnectId: \(connectId)")
+    }
+
+    func createConnection(
+        connectId: UInt32,
+        appInstanceId: UUID,
+        deviceId: UUID,
+        membershipId: UUID?,
+        identityPrivateKey: Data? = nil
+    ) async throws {
+        Log.info("[ProtocolConnectionManager] Creating connection - ConnectId: \(connectId), Authenticated: \(membershipId != nil)")
+
+        let identityKeys: IdentityKeys
+        if let privateKeyData = identityPrivateKey, let membershipIdValue = membershipId {
+            identityKeys = try IdentityKeys.createFromMasterKey(
+                masterKey: privateKeyData,
+                membershipId: membershipIdValue.uuidString,
+                oneTimeKeyCount: 10
+            )
+            Log.info("[ProtocolConnectionManager] Created authenticated identity keys from master key")
+        } else {
+
+            identityKeys = try IdentityKeys.create(oneTimeKeyCount: 10)
+            Log.info("[ProtocolConnectionManager] Generated new anonymous identity keys")
+        }
+
+        let session = ProtocolSession(
+            connectId: connectId,
+            identityKeys: identityKeys,
+            doubleRatchet: nil
+        )
+
+        connections[connectId] = session
+
+        Log.info("[ProtocolConnectionManager] [OK] Connection created - ConnectId: \(connectId)")
+    }
+
+    private func serializeSessionState(_ session: ProtocolSession) throws -> Data {
+        Log.info("[ProtocolConnectionManager] Serializing session state - ConnectId: \(session.connectId)")
+
+        let identityKeysState = try session.identityKeys.toProtoState()
+
+        var ratchetState: RatchetState? = nil
+        if let doubleRatchet = session.doubleRatchet {
+            guard case .success(let state) = doubleRatchet.toProtoState() else {
+                throw ProtocolFailure.generic("Failed to serialize DoubleRatchet state")
+            }
+            ratchetState = state
+        }
+
+        let sessionState = ProtocolSessionState(
+            connectId: session.connectId,
+            identityKeysState: identityKeysState,
+            ratchetState: ratchetState,
+            createdAt: session.createdAt
+        )
+
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        let data = try encoder.encode(sessionState)
+
+        Log.info("[ProtocolConnectionManager] [OK] Session state serialized - Size: \(data.count) bytes")
+
+        return data
     }
 }

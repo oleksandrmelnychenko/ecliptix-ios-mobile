@@ -1,8 +1,6 @@
 import Foundation
 import os.log
 
-// MARK: - Default Logger Implementation
-/// Default logger implementation using os.Logger
 public final class DefaultLogger: Logger {
     private let osLogger: os.Logger
     private let subsystem: String
@@ -37,10 +35,8 @@ public final class DefaultLogger: Logger {
     }
 }
 
-// MARK: - Global Logger Instance
-public var Log: Logger = DefaultLogger()
+public nonisolated(unsafe) var Log: Logger = DefaultLogger()
 
-// MARK: - Configure Global Logger
 public func configureLogger(_ logger: Logger) {
     Log = logger
 }

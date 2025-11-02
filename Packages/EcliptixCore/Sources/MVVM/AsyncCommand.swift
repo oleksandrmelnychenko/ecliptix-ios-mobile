@@ -81,7 +81,6 @@ public final class DefaultAsyncCommand<Input: Sendable, Output: Sendable>: Async
 
         updateIsExecuting(true)
 
-        // Execute operation in nonisolated context
         let execTask = Task<Result<Output, Error>, Never> { @Sendable in
             do {
                 let result = try await execute(input)
@@ -91,12 +90,10 @@ public final class DefaultAsyncCommand<Input: Sendable, Output: Sendable>: Async
             }
         }
 
-        // Store execution task for cancellation
         executionTask = Task { @Sendable in
             _ = await execTask.value
         }
 
-        // Track result handling separately
         currentTask = Task { @MainActor in
             let result = await execTask.value
             self.handleExecutionResult(result)

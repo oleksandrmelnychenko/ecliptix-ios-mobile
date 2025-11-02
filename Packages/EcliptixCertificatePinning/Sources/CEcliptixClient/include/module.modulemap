@@ -1,0 +1,5 @@
+module CEcliptixClient {
+    umbrella header "CEcliptixClient.h"
+    export *
+    module * { export * }
+}

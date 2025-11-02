@@ -1,17 +1,10 @@
 import SwiftUI
 
-// MARK: - Registration View
-/// Modern SwiftUI view for user registration
-/// Multi-step registration flow with validation
 struct RegistrationView: View {
-
-    // MARK: - Environment
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @State private var authService: AuthenticationService
-
-    // MARK: - State
 
     @State private var mobileNumber: String = ""
     @State private var secureKey: String = ""
@@ -21,46 +14,33 @@ struct RegistrationView: View {
     @State private var showError: Bool = false
     @State private var currentStep: RegistrationStep = .mobileNumber
 
-    // MARK: - Registration Steps
-
     private enum RegistrationStep {
         case mobileNumber
         case secureKey
         case confirmation
     }
 
-    // MARK: - Initialization
-
     init(authService: AuthenticationService) {
         _authService = State(initialValue: authService)
     }
 
-    // MARK: - Body
-
     var body: some View {
         NavigationStack {
             ZStack {
-                // Background
                 backgroundColor
                     .ignoresSafeArea()
 
-                // Content
                 VStack(spacing: 0) {
-                    // Progress indicator
                     progressIndicator
 
                     ScrollView {
                         VStack(spacing: 32) {
-                            // Header
                             headerSection
 
-                            // Current step content
                             currentStepContent
 
-                            // Action button
                             actionButton
 
-                            // Alternative actions
                             if currentStep == .mobileNumber {
                                 alternativeActionsSection
                             }
@@ -101,8 +81,6 @@ struct RegistrationView: View {
         }
     }
 
-    // MARK: - Components
-
     private var backgroundColor: Color {
         colorScheme == .dark ? Color.black : Color.white
     }
@@ -121,7 +99,6 @@ struct RegistrationView: View {
 
     private var headerSection: some View {
         VStack(spacing: 16) {
-            // Icon
             Circle()
                 .fill(Color.blue.gradient)
                 .frame(width: 60, height: 60)
@@ -181,7 +158,6 @@ struct RegistrationView: View {
 
     private var secureKeyStep: some View {
         VStack(spacing: 20) {
-            // Secure key field
             VStack(alignment: .leading, spacing: 8) {
                 Text("Create Secure Key")
                     .font(.system(size: 14, weight: .medium))
@@ -208,7 +184,6 @@ struct RegistrationView: View {
                 .cornerRadius(12)
             }
 
-            // Requirements
             secureKeyRequirements
         }
     }
@@ -251,7 +226,6 @@ struct RegistrationView: View {
 
     private var confirmationStep: some View {
         VStack(spacing: 20) {
-            // Confirm secure key
             VStack(alignment: .leading, spacing: 8) {
                 Text("Confirm Secure Key")
                     .font(.system(size: 14, weight: .medium))
@@ -278,7 +252,6 @@ struct RegistrationView: View {
                 .cornerRadius(12)
             }
 
-            // Match indicator
             if !confirmSecureKey.isEmpty {
                 HStack {
                     Image(systemName: secureKeysMatch ? "checkmark.circle.fill" : "xmark.circle.fill")
@@ -337,8 +310,6 @@ struct RegistrationView: View {
             }
         }
     }
-
-    // MARK: - Computed Properties
 
     private var currentStepIcon: String {
         switch currentStep {
@@ -403,27 +374,20 @@ struct RegistrationView: View {
         }
     }
 
-    // MARK: - Actions
-
     private func handleAction() async {
         switch currentStep {
         case .mobileNumber:
-            // Validate mobile number
             await checkMobileAvailability()
 
         case .secureKey:
-            // Move to confirmation
             currentStep = .confirmation
 
         case .confirmation:
-            // Complete registration
             await performRegistration()
         }
     }
 
     private func checkMobileAvailability() async {
-        // Check if mobile number is available
-        // For now, just proceed to next step
         currentStep = .secureKey
     }
 
@@ -435,7 +399,6 @@ struct RegistrationView: View {
 
         switch result {
         case .success:
-            // OTP verification will be shown
             break
         case .failure:
             showError = true
@@ -453,8 +416,6 @@ struct RegistrationView: View {
         }
     }
 }
-
-// MARK: - Requirement Row
 
 private struct RequirementRow: View {
     let text: String
@@ -475,8 +436,6 @@ private struct RequirementRow: View {
     }
 }
 
-// MARK: - Preview
-
 #Preview {
-    RegistrationView(authService: AuthenticationService(networkProvider: nil))
+    Text("RegistrationView Preview")
 }

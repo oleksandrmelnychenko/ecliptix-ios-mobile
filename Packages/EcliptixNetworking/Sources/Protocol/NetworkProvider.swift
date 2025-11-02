@@ -1,65 +1,38 @@
-import Foundation
 import Combine
 import EcliptixCore
 import EcliptixSecurity
+import Foundation
 
-// MARK: - Network Provider
-/// Central orchestrator for network operations with protocol encryption
-/// Migrated from: Ecliptix.Core/Infrastructure/Network/Core/Providers/NetworkProvider.cs (2293 lines)
-///
-/// Responsibilities:
-/// - Manages protocol connections (DoubleRatchet sessions)
-/// - Encrypts/decrypts all network traffic
-/// - Handles request deduplication
-/// - Coordinates outage recovery
-/// - Integrates with service clients
 @MainActor
 public final class NetworkProvider {
 
-    // MARK: - Properties
+    internal let connectionManager: ProtocolConnectionManager
+    internal let channelManager: GRPCChannelManager
+    internal let connectivityService: ConnectivityService
+    internal let retryStrategy: RetryStrategy
+    internal let pendingRequestManager: PendingRequestManager
+    internal let circuitBreaker: CircuitBreaker
+    internal let healthMonitor: ConnectionHealthMonitor
 
-    private let connectionManager: ProtocolConnectionManager
-    private let channelManager: GRPCChannelManager
-    private let retryStrategy: RetryStrategy
-    private let pendingRequestManager: PendingRequestManager
-    private let connectivityMonitor: NetworkConnectivityMonitor
-    private let circuitBreaker: CircuitBreaker
-    private let healthMonitor: ConnectionHealthMonitor
+    internal var activeRequests: [String: Task<Void, Never>] = [:]
 
-    /// Active requests for deduplication (request key -> cancellation handle)
-    private var activeRequests: [String: Task<Void, Never>] = [:]
-    private let activeRequestsLock = NSLock()
+    internal var isInOutage: Bool = false
+    internal var outageRecoveryContinuation: CheckedContinuation<Void, Never>?
 
-    /// Outage state management
-    private var isInOutage: Bool = false
-    private var outageRecoveryContinuation: CheckedContinuation<Void, Never>?
-    private let outageLock = NSLock()
+    internal var applicationInstanceSettings: ApplicationInstanceSettings?
 
-    /// Application instance settings
-    private var applicationInstanceSettings: ApplicationInstanceSettings?
+    internal var isShutdown: Bool = false
 
-    /// Cancellation token for shutdown
-    private var isShutdown: Bool = false
+    private var backgroundTasks: [Task<Void, Never>] = []
 
-    // MARK: - Types
-
-    /// Application instance settings
-    public struct ApplicationInstanceSettings {
-        public let appInstanceId: UUID
-        public let deviceId: UUID
-        public let culture: String
-        public let membershipId: String?
-
-        public init(appInstanceId: UUID, deviceId: UUID, culture: String = "en-US", membershipId: String? = nil) {
-            self.appInstanceId = appInstanceId
-            self.deviceId = deviceId
-            self.culture = culture
-            self.membershipId = membershipId
-        }
+    public enum ConnectionMode {
+        case authenticated
+        case unauthenticated
     }
 
-    /// RPC Service Type (maps to C# RpcServiceType)
-    public enum RPCServiceType: String {
+    internal var connectionMode: ConnectionMode = .unauthenticated
+
+    public enum RPCServiceType: String, Sendable {
         case registrationInit
         case registrationComplete
         case signInInit
@@ -76,86 +49,117 @@ public final class NetworkProvider {
         case sendMessage
     }
 
-    // MARK: - Initialization
-
     public init(
         connectionManager: ProtocolConnectionManager = ProtocolConnectionManager(),
         channelManager: GRPCChannelManager,
+        connectivityService: ConnectivityService? = nil,
         retryConfiguration: RetryConfiguration = .default,
         circuitBreakerConfiguration: CircuitBreakerConfiguration = .default,
-        healthMonitorConfiguration: HealthMonitorConfiguration = .default,
-        connectivityMonitor: NetworkConnectivityMonitor = NetworkConnectivityMonitor()
+        healthMonitorConfiguration: HealthMonitorConfiguration = .default
     ) {
         self.connectionManager = connectionManager
         self.channelManager = channelManager
+
+        let connectivity = connectivityService ?? DefaultConnectivityService()
+        self.connectivityService = connectivity
+
         self.retryStrategy = RetryStrategy(configuration: retryConfiguration)
+
         self.pendingRequestManager = PendingRequestManager()
+
         self.circuitBreaker = CircuitBreaker(configuration: circuitBreakerConfiguration)
         self.healthMonitor = ConnectionHealthMonitor(configuration: healthMonitorConfiguration)
-        self.connectivityMonitor = connectivityMonitor
 
-        // Start monitoring network connectivity
-        connectivityMonitor.start()
+        if let defaultConnectivity = connectivity as? DefaultConnectivityService {
+            defaultConnectivity.startMonitoring()
+        }
 
-        // Subscribe to network status changes
-        Task {
+        let networkChangesTask = Task {
             await self.subscribeToNetworkChanges()
         }
+        backgroundTasks.append(networkChangesTask)
 
-        // Subscribe to health status changes
-        Task {
+        let healthChangesTask = Task {
             await self.subscribeToHealthChanges()
         }
+        backgroundTasks.append(healthChangesTask)
+
+        let manualRetryTask = Task {
+            await self.subscribeToManualRetryEvents()
+        }
+        backgroundTasks.append(manualRetryTask)
     }
 
-    // MARK: - Network Connectivity
+    deinit {
+        for task in backgroundTasks {
+            task.cancel()
+        }
+        backgroundTasks.removeAll()
+    }
 
-    /// Subscribes to health status changes
     private func subscribeToHealthChanges() async {
         for await health in healthMonitor.healthStatusPublisher.values {
-            // React to health changes
+
             if health.status == .critical {
-                // Trip circuit breaker for critical connections
-                Log.warning("[NetworkProvider] ⚠️ Connection \(health.connectId) is critical - considering circuit breaker")
+
+                Log.warning("[NetworkProvider] [WARNING] Connection \(health.connectId) is critical - considering circuit breaker")
             } else if health.status == .healthy {
-                // Reset circuit breaker when connection becomes healthy
+
                 circuitBreaker.resetConnection(health.connectId)
-                retryStrategy.markConnectionHealthy(connectId: health.connectId)
-                Log.info("[NetworkProvider] ✅ Connection \(health.connectId) is healthy - reset circuit")
+                await retryStrategy.markConnectionHealthy(connectId: health.connectId)
+                Log.info("[NetworkProvider] [OK] Connection \(health.connectId) is healthy - reset circuit")
             }
         }
     }
 
-    /// Subscribes to network status changes for outage recovery
     private func subscribeToNetworkChanges() async {
-        for await status in connectivityMonitor.statusPublisher.values {
-            switch status {
+        for await snapshot in connectivityService.connectivityStream.values {
+            switch snapshot.status {
             case .connected:
-                // Exit outage when network restored
+
                 if isInOutage {
                     exitOutage()
                 }
 
-            case .disconnected:
-                // Enter outage when network lost
+            case .disconnected, .unavailable, .shuttingDown:
+
                 if !isInOutage {
                     enterOutage()
                 }
 
-            case .restoring:
-                // Network is attempting to restore
-                Log.info("[NetworkProvider] Network is restoring...")
+            case .retriesExhausted:
+
+                Log.warning("[NetworkProvider]  Network retries exhausted")
+                if !isInOutage {
+                    enterOutage()
+                }
+
+            case .connecting, .recovering:
+
+                break
             }
         }
     }
 
-    // MARK: - Outage Management
+    private func subscribeToManualRetryEvents() async {
+        _ = connectivityService.onManualRetryRequested { [weak self] event in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
 
-    /// Enters outage mode - queues all new requests
-    /// Migrated from: EnterOutage()
+                Log.info("[NetworkProvider]  Manual retry requested")
+
+                if self.isInOutage {
+                    self.exitOutage()
+                }
+
+                if let connectId = event.connectId {
+                    Log.debug("[NetworkProvider] Retrying for connection \(connectId)")
+                }
+            }
+        }
+    }
+
     private func enterOutage() {
-        outageLock.lock()
-        defer { outageLock.unlock() }
 
         guard !isInOutage else { return }
 
@@ -163,64 +167,42 @@ public final class NetworkProvider {
         Log.warning("[NetworkProvider] Entered network outage mode")
     }
 
-    /// Exits outage mode - resumes queued requests
-    /// Migrated from: ExitOutage()
     private func exitOutage() {
-        outageLock.lock()
         let continuation = outageRecoveryContinuation
         outageRecoveryContinuation = nil
         isInOutage = false
-        outageLock.unlock()
 
-        Log.info("[NetworkProvider] Exited network outage mode")
+        Log.info("[NetworkProvider] [OK] Exited network outage mode")
 
-        // Resume all waiting requests
         continuation?.resume()
 
-        // Retry all pending requests that failed during outage
-        Task {
-            let successCount = await pendingRequestManager.retryAllPendingRequests()
-            if successCount > 0 {
-                Log.info("[NetworkProvider] 🔄 Outage recovery: \(successCount) pending requests succeeded")
-            }
-        }
+        Log.debug("[NetworkProvider] Pending requests will auto-retry via ConnectivityService")
     }
 
-    /// Waits for outage to be resolved before executing request
-    /// Migrated from: WaitForOutageRecoveryAsync()
     private func waitForOutageRecovery() async throws {
-        outageLock.lock()
         guard isInOutage else {
-            outageLock.unlock()
             return
         }
-        outageLock.unlock()
 
         Log.info("[NetworkProvider] Waiting for outage recovery...")
 
         await withCheckedContinuation { continuation in
-            outageLock.lock()
+            outageRecoveryContinuation = continuation
+
             if !isInOutage {
-                outageLock.unlock()
-                continuation.resume()
-            } else {
-                outageRecoveryContinuation = continuation
-                outageLock.unlock()
+                let storedContinuation = outageRecoveryContinuation
+                outageRecoveryContinuation = nil
+                storedContinuation?.resume()
             }
         }
     }
 
-    // MARK: - Request Deduplication
-
-    /// Generates a unique request key for deduplication
-    /// Migrated from: NetworkProvider request key generation
     private func generateRequestKey(connectId: UInt32, serviceType: RPCServiceType, plainBuffer: Data) -> String {
-        // For auth operations, use service type only
+
         if serviceType == .signInInit || serviceType == .signInComplete {
             return "\(connectId)_\(serviceType.rawValue)_auth_operation"
         }
 
-        // For other operations, hash first bytes of buffer
         let bytesToHash = min(plainBuffer.count, 32)
         let prefix = plainBuffer.prefix(bytesToHash)
         let hexString = prefix.map { String(format: "%02x", $0) }.joined()
@@ -228,9 +210,8 @@ public final class NetworkProvider {
         return "\(connectId)_\(serviceType.rawValue)_\(hexString)"
     }
 
-    /// Checks if a service type allows duplicate requests
     private func canServiceTypeBeDuplicated(_ serviceType: RPCServiceType) -> Bool {
-        // Some service types can have concurrent requests
+
         switch serviceType {
         case .sendMessage, .updateDeviceInfo:
             return true
@@ -239,41 +220,35 @@ public final class NetworkProvider {
         }
     }
 
-    // MARK: - Connection Management
-
-    /// Initializes a protocol connection with identity keys
-    /// Migrated from: InitiateEcliptixProtocolSystem()
-    public func initiateProtocolConnection(connectId: UInt32, identityKeys: IdentityKeys) {
-        connectionManager.addConnection(connectId: connectId, identityKeys: identityKeys)
-        Log.info("[NetworkProvider] Initiated protocol connection \(connectId)")
+    public func setConnectionMode(_ mode: ConnectionMode) {
+        self.connectionMode = mode
+        switch mode {
+        case .authenticated:
+            Log.info("[NetworkProvider]  Connection mode set to AUTHENTICATED (E2E encrypted)")
+        case .unauthenticated:
+            Log.info("[NetworkProvider] [WARNING] Connection mode set to UNAUTHENTICATED (plain connection)")
+        }
     }
 
-    /// Removes a protocol connection
-    /// Migrated from: CleanupStreamProtocolAsync()
-    public func cleanupProtocolConnection(_ connectId: UInt32) {
-        connectionManager.removeConnection(connectId)
+    public func initiateProtocolConnection(connectId: UInt32, identityKeys: IdentityKeys) async {
+        await connectionManager.addConnection(connectId: connectId, identityKeys: identityKeys)
+        Log.info("[NetworkProvider] Initiated protocol connection \(connectId)")
+
+        if let defaultConnectivity = connectivityService as? DefaultConnectivityService {
+            defaultConnectivity.notifyServerConnecting(connectId: connectId)
+        }
+    }
+
+    public func cleanupProtocolConnection(_ connectId: UInt32) async {
+        await connectionManager.removeConnection(connectId)
         Log.info("[NetworkProvider] Cleaned up protocol connection \(connectId)")
     }
 
-    /// Sets application instance settings
     public func setApplicationInstanceSettings(_ settings: ApplicationInstanceSettings) {
         self.applicationInstanceSettings = settings
         Log.info("[NetworkProvider] Application instance settings configured")
     }
 
-    // MARK: - Request Execution
-
-    /// Executes a unary RPC request with protocol encryption
-    /// Migrated from: ExecuteUnaryRequestAsync()
-    ///
-    /// - Parameters:
-    ///   - connectId: Protocol connection identifier
-    ///   - serviceType: Type of RPC service
-    ///   - plainBuffer: Plain (unencrypted) request data
-    ///   - allowDuplicates: Allow duplicate concurrent requests
-    ///   - waitForRecovery: Wait for network outage recovery
-    ///   - onCompleted: Callback with decrypted response data
-    /// - Returns: Result with Unit or NetworkFailure
     public func executeUnaryRequest(
         connectId: UInt32,
         serviceType: RPCServiceType,
@@ -283,26 +258,23 @@ public final class NetworkProvider {
         onCompleted: @escaping (Data) async throws -> Void
     ) async -> Result<Void, NetworkFailure> {
 
-        // Generate request key for deduplication
         let requestKey = generateRequestKey(connectId: connectId, serviceType: serviceType, plainBuffer: plainBuffer)
 
-        // Check for duplicates
         let shouldAllowDuplicates = allowDuplicates || canServiceTypeBeDuplicated(serviceType)
+
         if !shouldAllowDuplicates {
-            activeRequestsLock.lock()
             if activeRequests[requestKey] != nil {
-                activeRequestsLock.unlock()
                 Log.warning("[NetworkProvider] Duplicate request rejected: \(requestKey)")
                 return .failure(NetworkFailure(
                     type: .invalidRequest,
                     message: "Duplicate request rejected",
-                    shouldRetry: false
                 ))
             }
-            activeRequestsLock.unlock()
+
+            let placeholder = Task<Void, Never> { }
+            activeRequests[requestKey] = placeholder
         }
 
-        // Execute request with deduplication tracking
         return await withTaskCancellationHandler {
             await executeRequestInternal(
                 connectId: connectId,
@@ -314,18 +286,16 @@ public final class NetworkProvider {
                 onCompleted: onCompleted
             )
         } onCancel: {
-            // Remove from active requests if cancelled
+
             if !shouldAllowDuplicates {
-                activeRequestsLock.lock()
-                activeRequests.removeValue(forKey: requestKey)
-                activeRequestsLock.unlock()
+                Task { @MainActor in
+                    activeRequests.removeValue(forKey: requestKey)
+                }
             }
         }
     }
 
-    /// Executes a unary RPC request with retry strategy
-    /// This is the recommended method to use - it wraps executeUnaryRequest with retry logic
-    public func executeWithRetry<T>(
+    public func executeWithRetry<T: Sendable>(
         operationName: String,
         connectId: UInt32,
         serviceType: RPCServiceType,
@@ -333,10 +303,9 @@ public final class NetworkProvider {
         allowDuplicates: Bool = false,
         waitForRecovery: Bool = true,
         maxRetries: Int? = nil,
-        onCompleted: @escaping (Data) async throws -> T
+        onCompleted: @escaping @Sendable (Data) async throws -> T
     ) async -> Result<T, NetworkFailure> {
 
-        // Execute with retry strategy
         let result = await retryStrategy.executeRPCOperation(
             operationName: operationName,
             connectId: connectId,
@@ -345,23 +314,27 @@ public final class NetworkProvider {
         ) { attempt in
             Log.debug("[NetworkProvider] Executing '\(operationName)' attempt \(attempt)")
 
-            // Execute the request
-            let requestResult = await executeUnaryRequest(
+            var capturedResult: T?
+            let requestResult = await self.executeUnaryRequest(
                 connectId: connectId,
                 serviceType: serviceType,
                 plainBuffer: plainBuffer,
                 allowDuplicates: allowDuplicates,
                 waitForRecovery: waitForRecovery
             ) { responseData in
-                try await onCompleted(responseData)
+                capturedResult = try await onCompleted(responseData)
             }
 
-            // Map Result<Void, NetworkFailure> to Result<T, NetworkFailure>
             switch requestResult {
             case .success:
-                // We need to return the actual value from onCompleted
-                // For now, return Unit result (will be improved with better API)
-                return .success(() as! T)
+                if let value = capturedResult {
+                    return .success(value)
+                } else {
+                    return .failure(NetworkFailure(
+                        type: .unknown,
+                        message: "Response processing failed - no result captured"
+                    ))
+                }
             case .failure(let error):
                 return .failure(error)
             }
@@ -370,7 +343,6 @@ public final class NetworkProvider {
         return result
     }
 
-    /// Internal request execution with encryption/decryption
     private func executeRequestInternal(
         connectId: UInt32,
         serviceType: RPCServiceType,
@@ -381,27 +353,14 @@ public final class NetworkProvider {
         onCompleted: @escaping (Data) async throws -> Void
     ) async -> Result<Void, NetworkFailure> {
 
-        // Track request start time for latency measurement
         let requestStartTime = Date()
 
-        // Track active request
-        let requestTask = Task { }
-        if !shouldAllowDuplicates {
-            activeRequestsLock.lock()
-            activeRequests[requestKey] = requestTask
-            activeRequestsLock.unlock()
-        }
-
         defer {
-            // Remove from active requests
             if !shouldAllowDuplicates {
-                activeRequestsLock.lock()
                 activeRequests.removeValue(forKey: requestKey)
-                activeRequestsLock.unlock()
             }
         }
 
-        // Execute with circuit breaker protection
         let circuitResult = await circuitBreaker.execute(
             connectId: connectId,
             operationName: serviceType.rawValue
@@ -410,12 +369,12 @@ public final class NetworkProvider {
                 connectId: connectId,
                 serviceType: serviceType,
                 plainBuffer: plainBuffer,
+                requestKey: requestKey,
                 waitForRecovery: waitForRecovery,
                 onCompleted: onCompleted
             )
         }
 
-        // Record health metrics
         let latency = Date().timeIntervalSince(requestStartTime)
         switch circuitResult {
         case .success:
@@ -427,16 +386,15 @@ public final class NetworkProvider {
         return circuitResult
     }
 
-    /// Executes request with protocol encryption (called by circuit breaker)
     private func executeRequestWithProtocol(
         connectId: UInt32,
         serviceType: RPCServiceType,
         plainBuffer: Data,
+        requestKey: String,
         waitForRecovery: Bool,
         onCompleted: @escaping (Data) async throws -> Void
     ) async -> Result<Void, NetworkFailure> {
 
-        // Wait for outage recovery if needed
         if waitForRecovery {
             do {
                 try await waitForOutageRecovery()
@@ -444,44 +402,62 @@ public final class NetworkProvider {
                 return .failure(NetworkFailure(
                     type: .operationCancelled,
                     message: "Request cancelled during outage recovery",
-                    shouldRetry: false
                 ))
             }
         }
 
-        // Check if connection exists
-        guard connectionManager.hasConnection(connectId) else {
+        switch connectionMode {
+        case .authenticated:
+            return await executeAuthenticatedRequest(
+                connectId: connectId,
+                serviceType: serviceType,
+                plainBuffer: plainBuffer,
+                onCompleted: onCompleted
+            )
+
+        case .unauthenticated:
+            return await executeUnauthenticatedRequest(
+                connectId: connectId,
+                serviceType: serviceType,
+                plainBuffer: plainBuffer,
+                onCompleted: onCompleted
+            )
+        }
+    }
+
+    private func executeAuthenticatedRequest(
+        connectId: UInt32,
+        serviceType: RPCServiceType,
+        plainBuffer: Data,
+        onCompleted: @escaping (Data) async throws -> Void
+    ) async -> Result<Void, NetworkFailure> {
+
+        guard await connectionManager.hasConnection(connectId) else {
             Log.error("[NetworkProvider] Connection \(connectId) not found")
             return .failure(NetworkFailure(
                 type: .dataCenterNotResponding,
                 message: "Connection unavailable - server may be recovering",
-                shouldRetry: true
             ))
         }
 
-        // Encrypt plain buffer with protocol
-        let encryptResult = connectionManager.encryptOutbound(connectId, plainData: plainBuffer)
+        let encryptResult = await connectionManager.encryptOutbound(connectId, plainData: plainBuffer)
         guard case .success(let encryptedEnvelope) = encryptResult else {
             if case .failure(let protocolError) = encryptResult {
                 Log.error("[NetworkProvider] Encryption failed: \(protocolError.message)")
                 return .failure(NetworkFailure(
-                    type: .serverError,
+                    type: .encryptionFailed,
                     message: "Encryption failed: \(protocolError.message)",
-                    shouldRetry: false
+                    underlyingError: protocolError
                 ))
             }
             return .failure(NetworkFailure(
-                type: .serverError,
-                message: "Encryption failed",
-                shouldRetry: false
+                type: .encryptionFailed,
+                message: "Encryption failed with unknown error",
             ))
         }
 
-        Log.info("[NetworkProvider] Encrypted outbound for \(serviceType.rawValue)")
+        Log.info("[NetworkProvider]  Encrypted outbound for \(serviceType.rawValue)")
 
-        // Send encrypted request via gRPC
-        // TODO: Replace with actual gRPC service call once protobuf is generated
-        // For now, return placeholder error
         let responseEnvelope = await sendViaGRPC(serviceType: serviceType, envelope: encryptedEnvelope)
 
         guard case .success(let inboundEnvelope) = responseEnvelope else {
@@ -491,60 +467,89 @@ public final class NetworkProvider {
             return .failure(NetworkFailure(
                 type: .serverError,
                 message: "gRPC request failed",
-                shouldRetry: true
             ))
         }
 
-        // Decrypt response
-        let decryptResult = connectionManager.decryptInbound(connectId, envelope: inboundEnvelope)
+        let decryptResult = await connectionManager.decryptInbound(connectId, envelope: inboundEnvelope)
         guard case .success(let decryptedData) = decryptResult else {
             if case .failure(let protocolError) = decryptResult {
                 Log.error("[NetworkProvider] Decryption failed: \(protocolError.message)")
                 return .failure(NetworkFailure(
-                    type: .serverError,
+                    type: .decryptionFailed,
                     message: "Decryption failed: \(protocolError.message)",
-                    shouldRetry: false
+                    underlyingError: protocolError
                 ))
             }
             return .failure(NetworkFailure(
-                type: .serverError,
-                message: "Decryption failed",
-                shouldRetry: false
+                type: .decryptionFailed,
+                message: "Decryption failed with unknown error",
             ))
         }
 
-        Log.info("[NetworkProvider] Decrypted inbound for \(serviceType.rawValue), size: \(decryptedData.count)")
+        Log.info("[NetworkProvider]  Decrypted inbound for \(serviceType.rawValue), size: \(decryptedData.count)")
 
-        // Call completion handler with decrypted data
         do {
             try await onCompleted(decryptedData)
+            notifyServerConnected(connectId: connectId)
             return .success(())
         } catch {
             Log.error("[NetworkProvider] Completion handler failed: \(error)")
-
-            let failure = NetworkFailure(
+            return .failure(NetworkFailure(
                 type: .serverError,
                 message: "Failed to process response: \(error.localizedDescription)",
-                shouldRetry: false
-            )
-
-            // Register for retry if appropriate
-            if failure.shouldRetry && waitForRecovery {
-                registerPendingRequest(
-                    requestKey: requestKey,
-                    connectId: connectId,
-                    serviceType: serviceType,
-                    plainBuffer: plainBuffer,
-                    onCompleted: onCompleted
-                )
-            }
-
-            return .failure(failure)
+            ))
         }
     }
 
-    /// Registers a failed request for later retry
-    /// Migrated from: RegisterPendingRequest()
+    private func executeUnauthenticatedRequest(
+        connectId: UInt32,
+        serviceType: RPCServiceType,
+        plainBuffer: Data,
+        onCompleted: @escaping (Data) async throws -> Void
+    ) async -> Result<Void, NetworkFailure> {
+
+        Log.info("[NetworkProvider] [WARNING] Sending PLAIN (unencrypted) request for \(serviceType.rawValue)")
+
+        let plainEnvelope = SecureEnvelope(
+            metaData: Data(),
+            encryptedPayload: plainBuffer,
+            resultCode: Data(),
+            authenticationTag: Data(),
+            timestamp: Date(),
+            errorDetails: nil,
+            headerNonce: Data(),
+            dhPublicKey: nil
+        )
+
+        let responseEnvelope = await sendViaGRPC(serviceType: serviceType, envelope: plainEnvelope)
+
+        guard case .success(let inboundEnvelope) = responseEnvelope else {
+            if case .failure(let networkError) = responseEnvelope {
+                return .failure(networkError)
+            }
+            return .failure(NetworkFailure(
+                type: .serverError,
+                message: "gRPC request failed",
+            ))
+        }
+
+        let responseData = inboundEnvelope.encryptedPayload
+
+        Log.info("[NetworkProvider] [WARNING] Received PLAIN response for \(serviceType.rawValue), size: \(responseData.count)")
+
+        do {
+            try await onCompleted(responseData)
+            notifyServerConnected(connectId: connectId)
+            return .success(())
+        } catch {
+            Log.error("[NetworkProvider] Completion handler failed: \(error)")
+            return .failure(NetworkFailure(
+                type: .serverError,
+                message: "Failed to process response: \(error.localizedDescription)",
+            ))
+        }
+    }
+
     private func registerPendingRequest(
         requestKey: String,
         connectId: UInt32,
@@ -553,17 +558,16 @@ public final class NetworkProvider {
         onCompleted: @escaping (Data) async throws -> Void
     ) {
         pendingRequestManager.registerPendingRequest(requestId: requestKey) {
-            // Retry action - re-execute the request
+
             let result = await self.executeUnaryRequest(
                 connectId: connectId,
                 serviceType: serviceType,
                 plainBuffer: plainBuffer,
-                allowDuplicates: true, // Allow during retry
-                waitForRecovery: false, // Don't wait again
+                allowDuplicates: true,
+                waitForRecovery: false,
                 onCompleted: onCompleted
             )
 
-            // Throw error if failed to propagate to PendingRequestManager
             if case .failure(let error) = result {
                 throw NSError(
                     domain: "NetworkProvider",
@@ -574,60 +578,104 @@ public final class NetworkProvider {
         }
     }
 
-    /// Sends encrypted envelope via gRPC
-    /// TODO: Replace with actual protobuf-generated service clients
     private func sendViaGRPC(serviceType: RPCServiceType, envelope: SecureEnvelope) async -> Result<SecureEnvelope, NetworkFailure> {
-        // Placeholder - will be replaced with actual gRPC calls after protobuf generation
-        Log.warning("[NetworkProvider] sendViaGRPC is a placeholder - awaiting protobuf generation")
+        Log.debug("[NetworkProvider] Routing \(serviceType.rawValue) to service client")
 
+        switch serviceType {
+
+        case .registrationInit, .registrationComplete, .signInInit, .signInComplete,
+             .logout, .validateMobileNumber, .checkMobileAvailability, .verifyOtp:
+            let membershipClient = MembershipServiceClient(channelManager: channelManager)
+            return await routeToMembershipService(
+                serviceType: serviceType,
+                envelope: envelope,
+                client: membershipClient
+            )
+
+        case .registerDevice, .updateDeviceInfo, .getDeviceStatus:
+            let deviceClient = DeviceServiceClient(channelManager: channelManager)
+            return await routeToDeviceService(
+                serviceType: serviceType,
+                envelope: envelope,
+                client: deviceClient
+            )
+
+        case .restoreSecureChannel, .establishSecureChannel:
+            let secureChannelClient = SecureChannelServiceClient(channelManager: channelManager)
+            return await routeToSecureChannelService(
+                serviceType: serviceType,
+                envelope: envelope,
+                client: secureChannelClient
+            )
+
+        case .sendMessage:
+            let secureChannelClient = SecureChannelServiceClient(channelManager: channelManager)
+            return await secureChannelClient.sendEncryptedMessage(envelope: envelope)
+        }
+    }
+
+    private func routeToMembershipService(
+        serviceType: RPCServiceType,
+        envelope: SecureEnvelope,
+        client: MembershipServiceClient
+    ) async -> Result<SecureEnvelope, NetworkFailure> {
+        Log.warning("[NetworkProvider] [STUB] routeToMembershipService not fully implemented for \(serviceType.rawValue)")
         return .failure(NetworkFailure(
-            type: .serverError,
-            message: "Protobuf service clients not yet generated. Run ./generate-protos.sh",
-            shouldRetry: false
+            type: .unknown,
+            message: "routeToMembershipService stub - needs type conversion SecureEnvelope <-> Common_SecureEnvelope"
         ))
     }
 
-    // MARK: - Secure Channel Operations
+    private func routeToDeviceService(
+        serviceType: RPCServiceType,
+        envelope: SecureEnvelope,
+        client: DeviceServiceClient
+    ) async -> Result<SecureEnvelope, NetworkFailure> {
+        Log.warning("[NetworkProvider] [STUB] routeToDeviceService not fully implemented for \(serviceType.rawValue)")
+        return .failure(NetworkFailure(
+            type: .unknown,
+            message: "routeToDeviceService stub - needs type conversion SecureEnvelope <-> Common_SecureEnvelope"
+        ))
+    }
 
-    /// Establishes a secure channel using X3DH + Double Ratchet
-    /// Migrated from: EstablishSecrecyChannelAsync()
+    private func routeToSecureChannelService(
+        serviceType: RPCServiceType,
+        envelope: SecureEnvelope,
+        client: SecureChannelServiceClient
+    ) async -> Result<SecureEnvelope, NetworkFailure> {
+        Log.warning("[NetworkProvider] [STUB] routeToSecureChannelService not fully implemented for \(serviceType.rawValue)")
+        return .failure(NetworkFailure(
+            type: .unknown,
+            message: "routeToSecureChannelService stub - needs type conversion SecureEnvelope <-> Common_SecureEnvelope"
+        ))
+    }
+
     public func establishSecureChannel(
         connectId: UInt32,
         remotePublicKeyBundle: PublicKeyBundle
     ) async -> Result<SessionState, NetworkFailure> {
 
-        guard let session = connectionManager.getConnection(connectId) else {
+        guard let session = await connectionManager.getConnection(connectId) else {
             return .failure(NetworkFailure(
                 type: .dataCenterNotResponding,
                 message: "Connection \(connectId) not found",
-                shouldRetry: false
             ))
         }
 
-        // Perform X3DH key agreement
-        let sharedSecretResult = session.identityKeys.x3dhDeriveSharedSecret(
-            remoteBundle: remotePublicKeyBundle,
-            info: Data("EcliptixSecureChannel".utf8)
-        )
-
-        guard case .success(let sharedSecret) = sharedSecretResult else {
-            if case .failure(let error) = sharedSecretResult {
-                Log.error("[NetworkProvider] X3DH key agreement failed: \(error.message)")
-                return .failure(NetworkFailure(
-                    type: .authenticationRequired,
-                    message: "Key agreement failed: \(error.message)",
-                    shouldRetry: false
-                ))
-            }
+        let sharedSecret: Data
+        do {
+            sharedSecret = try session.identityKeys.x3dhDeriveSharedSecret(
+                remoteBundle: remotePublicKeyBundle,
+                info: Data("EcliptixSecureChannel".utf8)
+            )
+        } catch {
+            Log.error("[NetworkProvider] X3DH key agreement failed: \(error.localizedDescription)")
             return .failure(NetworkFailure(
                 type: .authenticationRequired,
-                message: "Key agreement failed",
-                shouldRetry: false
+                message: "Key agreement failed: \(error.localizedDescription)",
             ))
         }
 
-        // Initialize Double Ratchet as initiator
-        // Note: ProtocolConnection needs finalization after creation
         let ratchetResult = ProtocolConnection.create(
             connectionId: connectId,
             isInitiator: true,
@@ -641,55 +689,54 @@ public final class NetworkProvider {
                 return .failure(NetworkFailure(
                     type: .serverError,
                     message: "Protocol initialization failed: \(error.message)",
-                    shouldRetry: false
                 ))
             }
             return .failure(NetworkFailure(
                 type: .serverError,
                 message: "Protocol initialization failed",
-                shouldRetry: false
             ))
         }
 
-        // Update connection with Double Ratchet
-        connectionManager.updateConnection(connectId, doubleRatchet: doubleRatchet)
+        await connectionManager.updateConnection(connectId, doubleRatchet: doubleRatchet)
 
         Log.info("[NetworkProvider] Secure channel established for connection \(connectId)")
 
-        // Return session state
+        let sendingIndex: UInt32
+        let receivingIndex: UInt32
+        do {
+            sendingIndex = try doubleRatchet.getSendingChainIndex()
+            receivingIndex = try doubleRatchet.getReceivingChainIndex()
+        } catch {
+            return .failure(NetworkFailure(
+                type: .serverError,
+                message: "Failed to get chain indices: \(error.localizedDescription)"
+            ))
+        }
+
         let sessionState = SessionState(
             connectId: connectId,
-            sendingChainIndex: doubleRatchet.sendingChainIndex,
-            receivingChainIndex: doubleRatchet.receivingChainIndex,
+            sendingChainIndex: sendingIndex,
+            receivingChainIndex: receivingIndex,
             establishedAt: Date()
         )
 
         return .success(sessionState)
     }
 
-    /// Restores a secure channel from saved state
-    /// Migrated from: RestoreSecrecyChannelAsync()
     public func restoreSecureChannel(
         connectId: UInt32,
         savedState: SessionState,
         identityKeys: IdentityKeys
     ) async -> Result<Bool, NetworkFailure> {
 
-        // TODO: Implement restoration from saved DoubleRatchet state
-        // This requires deserializing the ratchet state from storage
-
         Log.warning("[NetworkProvider] restoreSecureChannel not yet fully implemented")
 
         return .failure(NetworkFailure(
             type: .serverError,
             message: "Secure channel restoration not yet implemented",
-            shouldRetry: false
         ))
     }
 
-    // MARK: - Session State
-
-    /// Session state for a secure channel
     public struct SessionState {
         public let connectId: UInt32
         public let sendingChainIndex: UInt32
@@ -704,114 +751,104 @@ public final class NetworkProvider {
         }
     }
 
-    // MARK: - Manual Retry
-
-    /// Clears all exhausted operations and allows fresh retry attempts
-    /// Useful for "Retry" button in UI when all operations are exhausted
-    /// Migrated from: ClearExhaustedOperations()
-    public func clearExhaustedOperations() {
-        retryStrategy.clearExhaustedOperations()
-        Log.info("[NetworkProvider] 🔄 Cleared exhausted operations - fresh retry enabled")
+    public func clearExhaustedOperations() async {
+        await retryStrategy.clearExhaustedOperations()
+        Log.info("[NetworkProvider]  Cleared exhausted operations - fresh retry enabled")
     }
 
-    /// Marks a connection as healthy, resetting exhaustion state
-    /// Migrated from: MarkConnectionHealthy()
-    public func markConnectionHealthy(connectId: UInt32) {
-        retryStrategy.markConnectionHealthy(connectId: connectId)
-        Log.info("[NetworkProvider] ✅ Connection \(connectId) marked as healthy")
+    public func markConnectionHealthy(connectId: UInt32) async {
+        await retryStrategy.markConnectionHealthy(connectId: connectId)
+        Log.info("[NetworkProvider] [OK] Connection \(connectId) marked as healthy")
     }
 
-    /// Current count of pending requests waiting for retry
     public var pendingRequestCount: Int {
-        return pendingRequestManager.pendingRequestCount
+        return pendingRequestManager.queueSize
     }
 
-    /// Publisher for observing pending request count changes
-    public var pendingCountPublisher: PassthroughSubject<Int, Never> {
-        return pendingRequestManager.pendingCountPublisher
+    public var pendingRequestStatistics: (queued: Int, processed: Int, failed: Int) {
+        return pendingRequestManager.statistics
     }
 
-    // MARK: - Circuit Breaker & Health
-
-    /// Manually trips the circuit breaker (opens circuit)
-    /// Migrated from: TripCircuitBreaker()
     public func tripCircuitBreaker() {
         circuitBreaker.trip()
-        Log.warning("[NetworkProvider] ⚠️ Circuit breaker manually tripped")
+        Log.warning("[NetworkProvider] [WARNING] Circuit breaker manually tripped")
     }
 
-    /// Manually resets the circuit breaker (closes circuit)
-    /// Migrated from: ResetCircuitBreaker()
     public func resetCircuitBreaker() {
         circuitBreaker.reset()
-        Log.info("[NetworkProvider] 🔄 Circuit breaker manually reset")
+        Log.info("[NetworkProvider]  Circuit breaker manually reset")
     }
 
-    /// Resets circuit breaker for a specific connection
     public func resetCircuitBreakerForConnection(_ connectId: UInt32) {
         circuitBreaker.resetConnection(connectId)
-        Log.info("[NetworkProvider] 🔄 Circuit breaker reset for connection \(connectId)")
+        Log.info("[NetworkProvider]  Circuit breaker reset for connection \(connectId)")
     }
 
-    /// Gets circuit breaker metrics
     public func getCircuitBreakerMetrics() -> CircuitBreakerMetrics {
         return circuitBreaker.getMetrics()
     }
 
-    /// Gets circuit breaker metrics for a specific connection
     public func getConnectionCircuitMetrics(connectId: UInt32) -> ConnectionCircuitMetrics? {
         return circuitBreaker.getConnectionMetrics(connectId: connectId)
     }
 
-    /// Gets health status for a connection
-    /// Migrated from: GetConnectionHealth()
     public func getConnectionHealth(connectId: UInt32) -> ConnectionHealthMonitor.ConnectionHealth? {
         return healthMonitor.getHealth(connectId: connectId)
     }
 
-    /// Gets health status for all connections
     public func getAllConnectionHealth() -> [ConnectionHealthMonitor.ConnectionHealth] {
         return healthMonitor.getAllHealth()
     }
 
-    /// Gets overall health statistics
     public func getHealthStatistics() -> HealthStatistics {
         return healthMonitor.getStatistics()
     }
 
-    /// Resets health tracking for a connection
     public func resetConnectionHealth(connectId: UInt32) {
         healthMonitor.resetHealth(connectId: connectId)
     }
 
-    /// Publisher for health status changes
     public var healthStatusPublisher: PassthroughSubject<ConnectionHealthMonitor.ConnectionHealth, Never> {
         return healthMonitor.healthStatusPublisher
     }
 
-    // MARK: - Shutdown
-
-    /// Shuts down the network provider
     public func shutdown() async {
         isShutdown = true
 
-        // Stop connectivity monitoring
-        connectivityMonitor.stop()
+        if let defaultConnectivity = connectivityService as? DefaultConnectivityService {
+            defaultConnectivity.stopMonitoring()
+        }
 
-        // Close gRPC channel
         await channelManager.shutdown()
 
-        // Clear all connections
-        connectionManager.removeAll()
+        await connectionManager.removeAll()
 
-        // Clear active requests
-        activeRequestsLock.lock()
         activeRequests.removeAll()
-        activeRequestsLock.unlock()
 
-        // Cancel all pending requests
-        pendingRequestManager.cancelAllPendingRequests()
+        pendingRequestManager.clearQueue()
 
-        Log.info("[NetworkProvider] Shutdown complete")
+        Log.info("[NetworkProvider] [OK] Shutdown complete")
+    }
+
+    internal func notifyServerConnected(connectId: UInt32) {
+        if let defaultConnectivity = connectivityService as? DefaultConnectivityService {
+            defaultConnectivity.notifyServerConnected(connectId: connectId)
+        }
+    }
+
+    internal func notifyServerDisconnected(failure: NetworkFailure, connectId: UInt32) {
+        Log.warning("[NetworkProvider] [STUB] notifyServerDisconnected conversion between NetworkFailure types not implemented")
+    }
+
+    public var connectivity: ConnectivityService {
+        return connectivityService
+    }
+
+    public var isOffline: Bool {
+        return isInOutage || connectivityService.isOffline
+    }
+
+    public func requestManualRetry(connectId: UInt32? = nil) async {
+        await connectivityService.requestManualRetry(connectId: connectId)
     }
 }

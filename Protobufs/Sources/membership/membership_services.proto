@@ -1,0 +1,18 @@
+syntax = "proto3";
+import "common/secure_envelope.proto";
+import "membership/membership_core.proto";
+
+package membership;
+option csharp_namespace = "Ecliptix.Protobuf.Membership";
+
+service MembershipServices {
+  rpc OpaqueRegistrationInitRequest(common.SecureEnvelope) returns (common.SecureEnvelope);
+  rpc OpaqueRegistrationCompleteRequest(common.SecureEnvelope) returns (common.SecureEnvelope);
+  rpc OpaqueRecoverySecretKeyInitRequest(common.SecureEnvelope) returns (common.SecureEnvelope);
+  rpc OpaqueRecoverySecretKeyCompleteRequest(common.SecureEnvelope) returns (common.SecureEnvelope);
+  rpc OpaqueSignInInitRequest(common.SecureEnvelope) returns (common.SecureEnvelope);
+  rpc OpaqueSignInCompleteRequest(common.SecureEnvelope) returns (common.SecureEnvelope);
+  rpc Logout(common.SecureEnvelope) returns (common.SecureEnvelope);
+  rpc AnonymousLogout(common.SecureEnvelope) returns (common.SecureEnvelope);
+  rpc GetLogoutHistory(common.SecureEnvelope) returns (common.SecureEnvelope);
+}

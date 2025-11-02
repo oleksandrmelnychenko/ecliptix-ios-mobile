@@ -1,10 +1,8 @@
-import Foundation
 import Crypto
 import EcliptixCore
+import Foundation
 
-// MARK: - Ratchet Config
-/// Configuration for ratchet behavior
-public struct RatchetConfig {
+public struct RatchetConfig: Sendable {
     public let cacheWindowSize: UInt32
     public let ratchetIntervalSeconds: TimeInterval
     public let dhRatchetEveryNMessages: UInt32
@@ -12,7 +10,7 @@ public struct RatchetConfig {
 
     public static let `default` = RatchetConfig(
         cacheWindowSize: 100,
-        ratchetIntervalSeconds: 300, // 5 minutes
+        ratchetIntervalSeconds: 300,
         dhRatchetEveryNMessages: 100,
         ratchetOnNewDhKey: true
     )
@@ -43,56 +41,40 @@ public struct RatchetConfig {
     }
 }
 
-// MARK: - Protocol Connection
-/// Manages a secure protocol connection with Double Ratchet algorithm
-/// Complete migration from: Ecliptix.Protocol.System.Core.EcliptixProtocolConnection.cs
-public final class ProtocolConnection {
-
-    // MARK: - Properties
+public final class ProtocolConnection: @unchecked Sendable {
     private let id: UInt32
     private let isInitiator: Bool
     private let createdAt: Date
     private let ratchetConfig: RatchetConfig
-    private let sessionTimeout: TimeInterval = 3600 // 1 hour
+    private let sessionTimeout: TimeInterval = 3600
 
-    // Chains
     private var sendingChain: ProtocolChainStep
     private var receivingChain: ProtocolChainStep?
 
-    // Root key for DH ratcheting
     private var rootKey: Data
 
-    // DH keys
     private var sendingDhPrivateKey: Data
     private var sendingDhPublicKey: Data
     private var peerDhPublicKey: Data?
 
-    // Persistent DH keys (for initial handshake)
     private var persistentDhPrivateKey: Data?
     private var persistentDhPublicKey: Data?
 
-    // Metadata encryption key (derived from root key)
     private var metadataEncryptionKey: Data?
 
-    // Peer information
     private var peerBundle: PublicKeyBundle?
 
-    // State tracking
     private var lastRatchetTime: Date
     private var isFirstReceivingRatchet = true
     private var receivedNewDhKey = false
 
-    // Nonce counter for sending
-    private var nonceCounter: Int64 = 1000 // Start at 1000
+    private var nonceCounter: Int64 = 1000
 
-    // Replay protection and recovery
     private let replayProtection: ReplayProtection
     private let ratchetRecovery: RatchetRecovery
 
     private var isDisposed = false
     private let lock = NSRecursiveLock()
-
-    // MARK: - Initialization
     private init(
         id: UInt32,
         isInitiator: Bool,
@@ -125,9 +107,6 @@ public final class ProtocolConnection {
         dispose()
     }
 
-    // MARK: - Create Connection
-    /// Creates a new protocol connection
-    /// Migrated from: EcliptixProtocolConnection.Create()
     public static func create(
         connectionId: UInt32,
         isInitiator: Bool,
@@ -136,36 +115,30 @@ public final class ProtocolConnection {
         ratchetConfig: RatchetConfig = .default
     ) -> Result<ProtocolConnection, ProtocolFailure> {
 
-        // Validate root key
         guard initialRootKey.count == CryptographicConstants.x25519KeySize else {
             return .failure(.generic("Root key must be 32 bytes"))
         }
 
-        // Generate sending DH keys
         let x25519 = X25519KeyExchange()
         let (dhPrivateKey, dhPublicKey) = x25519.generateKeyPair()
         let dhPrivateKeyBytes = x25519.privateKeyToBytes(dhPrivateKey)
         let dhPublicKeyBytes = x25519.publicKeyToBytes(dhPublicKey)
 
-        // Generate persistent DH keys
         let (persistentDhPrivateKey, persistentDhPublicKey) = x25519.generateKeyPair()
         let persistentDhPrivateKeyBytes = x25519.privateKeyToBytes(persistentDhPrivateKey)
         let persistentDhPublicKeyBytes = x25519.publicKeyToBytes(persistentDhPublicKey)
 
-        // Create sending chain with DH keys
-        let sendingChainResult = ProtocolChainStep.create(
-            stepType: .sending,
-            initialChainKey: initialChainKey,
-            initialDhPrivateKey: dhPrivateKeyBytes,
-            initialDhPublicKey: dhPublicKeyBytes,
-            cacheWindowSize: ratchetConfig.cacheWindowSize
-        )
-
-        guard case .success(let sendingChain) = sendingChainResult else {
-            if case .failure(let error) = sendingChainResult {
-                return .failure(error)
-            }
-            return .failure(.generic("Failed to create sending chain"))
+        let sendingChain: ProtocolChainStep
+        do {
+            sendingChain = try ProtocolChainStep.create(
+                stepType: .sending,
+                initialChainKey: initialChainKey,
+                initialDhPrivateKey: dhPrivateKeyBytes,
+                initialDhPublicKey: dhPublicKeyBytes,
+                cacheWindowSize: ratchetConfig.cacheWindowSize
+            )
+        } catch {
+            return .failure(.generic("Failed to create sending chain: \(error.localizedDescription)"))
         }
 
         let connection = ProtocolConnection(
@@ -181,15 +154,11 @@ public final class ProtocolConnection {
             ratchetConfig: ratchetConfig
         )
 
-        // Derive metadata encryption key
         _ = connection.deriveMetadataEncryptionKey()
 
         return .success(connection)
     }
 
-    // MARK: - State Serialization
-    /// Serializes connection state to protobuf format
-    /// Migrated from: ToProtoState()
     public func toProtoState() -> Result<RatchetState, ProtocolFailure> {
         lock.lock()
         defer { lock.unlock() }
@@ -198,64 +167,67 @@ public final class ProtocolConnection {
             return .failure(.generic("Connection has been disposed"))
         }
 
-        // Serialize sending chain
-        guard case .success(let sendingStepState) = sendingChain.toProtoState() else {
-            return .failure(.generic("Failed to serialize sending chain"))
+        let sendingStepState: ChainStepState
+        do {
+            sendingStepState = try sendingChain.toProtoState()
+        } catch {
+            return .failure(.generic("Failed to serialize sending chain: \(error.localizedDescription)"))
         }
 
-        // Serialize receiving chain if it exists
         var receivingStepState: ChainStepState?
         if let receivingChain = receivingChain {
-            guard case .success(let state) = receivingChain.toProtoState() else {
-                return .failure(.generic("Failed to serialize receiving chain"))
+            do {
+                receivingStepState = try receivingChain.toProtoState()
+            } catch {
+                return .failure(.generic("Failed to serialize receiving chain: \(error.localizedDescription)"))
             }
-            receivingStepState = state
         }
 
-        let state = RatchetState(
-            isInitiator: isInitiator,
-            createdAt: createdAt,
-            nonceCounter: UInt64(nonceCounter),
-            peerBundle: peerBundle,
-            peerDhPublicKey: peerDhPublicKey ?? Data(),
-            isFirstReceivingRatchet: isFirstReceivingRatchet,
-            rootKey: rootKey,
-            sendingStep: sendingStepState,
-            receivingStep: receivingStepState
-        )
+        var state = RatchetState()
+        state.isInitiator = isInitiator
+        state.nonceCounter = UInt64(nonceCounter)
+        if let peerBundle = peerBundle {
+            state.peerBundle = peerBundle
+        }
+        state.peerDhPublicKey = peerDhPublicKey ?? Data()
+        state.isFirstReceivingRatchet = isFirstReceivingRatchet
+        state.rootKey = rootKey
+        state.sendingStep = sendingStepState
+        if let receivingStepState = receivingStepState {
+            state.receivingStep = receivingStepState
+        }
 
         return .success(state)
     }
 
-    /// Restores connection from protobuf state
-    /// Migrated from: FromProtoState()
     public static func fromProtoState(
         connectionId: UInt32,
         state: RatchetState,
         ratchetConfig: RatchetConfig = .default
     ) -> Result<ProtocolConnection, ProtocolFailure> {
 
-        // Restore sending chain
-        guard case .success(let sendingChain) = ProtocolChainStep.fromProtoState(
-            stepType: .sending,
-            state: state.sendingStep
-        ) else {
-            return .failure(.generic("Failed to restore sending chain"))
+        let sendingChain: ProtocolChainStep
+        do {
+            sendingChain = try ProtocolChainStep.fromProtoState(
+                stepType: .sending,
+                state: state.sendingStep
+            )
+        } catch {
+            return .failure(.generic("Failed to restore sending chain: \(error.localizedDescription)"))
         }
 
-        // Restore receiving chain if it exists
         var receivingChain: ProtocolChainStep?
-        if let receivingStepState = state.receivingStep {
-            guard case .success(let chain) = ProtocolChainStep.fromProtoState(
-                stepType: .receiving,
-                state: receivingStepState
-            ) else {
-                return .failure(.generic("Failed to restore receiving chain"))
+        if state.hasReceivingStep {
+            do {
+                receivingChain = try ProtocolChainStep.fromProtoState(
+                    stepType: .receiving,
+                    state: state.receivingStep
+                )
+            } catch {
+                return .failure(.generic("Failed to restore receiving chain: \(error.localizedDescription)"))
             }
-            receivingChain = chain
         }
 
-        // Extract DH keys from sending chain
         guard let sendingDhPrivateKey = sendingChain.getDhPrivateKey(),
               let sendingDhPublicKey = sendingChain.getDhPublicKey() else {
             return .failure(.generic("Failed to extract DH keys from sending chain"))
@@ -275,23 +247,21 @@ public final class ProtocolConnection {
         )
 
         connection.nonceCounter = Int64(state.nonceCounter)
-        connection.peerBundle = state.peerBundle
+        if state.hasPeerBundle {
+            connection.peerBundle = state.peerBundle
+        }
         connection.peerDhPublicKey = state.peerDhPublicKey.isEmpty ? nil : Data(state.peerDhPublicKey)
         connection.isFirstReceivingRatchet = state.isFirstReceivingRatchet
 
-        // Derive metadata encryption key
         _ = connection.deriveMetadataEncryptionKey()
 
         return .success(connection)
     }
 
-    // MARK: - Finalize Chain and DH Keys
-    /// Finalizes the connection with initial root key and peer DH key
-    /// Migrated from: FinalizeChainAndDhKeys()
     public func finalizeChainAndDhKeys(
         initialRootKey: Data,
         initialPeerDhPublicKey: Data
-    ) -> Result<Unit, ProtocolFailure> {
+    ) -> Result<Void, ProtocolFailure> {
         lock.lock()
         defer { lock.unlock() }
 
@@ -299,7 +269,6 @@ public final class ProtocolConnection {
             return .failure(.generic("Connection has been disposed"))
         }
 
-        // Fail if session is already finalized (both rootKey and receivingChain are set)
         if rootKey.count > 0 && receivingChain != nil {
             return .failure(.generic("Session already finalized"))
         }
@@ -316,7 +285,6 @@ public final class ProtocolConnection {
             return .failure(.generic("Persistent DH private key not available"))
         }
 
-        // Perform DH key agreement
         let x25519 = X25519KeyExchange()
         do {
             let dhSecret = try x25519.performKeyAgreementWithBytes(
@@ -324,19 +292,17 @@ public final class ProtocolConnection {
                 publicKeyBytes: initialPeerDhPublicKey
             )
 
-            // Derive new root key using HKDF
             let dhRatchetInfo = Data("ecliptix-dh-ratchet".utf8)
             let derived = try HKDFKeyDerivation.deriveKey(
                 inputKeyMaterial: dhSecret,
                 salt: initialRootKey,
                 info: dhRatchetInfo,
-                outputByteCount: 64 // 32 for root key + 32 for chains
+                outputByteCount: 64
             )
 
             let newRootKey = derived.prefix(32)
             let derivedKeyMaterial = derived.suffix(32)
 
-            // Derive sender and receiver chain keys
             let senderChainInfo = Data("ecliptix-initial-sender-chain".utf8)
             let receiverChainInfo = Data("ecliptix-initial-receiver-chain".utf8)
 
@@ -354,46 +320,41 @@ public final class ProtocolConnection {
                 outputByteCount: CryptographicConstants.x25519KeySize
             )
 
-            // Assign keys based on initiator status
             let finalSenderKey = isInitiator ? senderChainKey : receiverChainKey
             let finalReceiverKey = isInitiator ? receiverChainKey : senderChainKey
 
-            // Update sending chain with new key
-            guard case .success = sendingChain.updateKeysAfterDhRatchet(newChainKey: finalSenderKey) else {
-                return .failure(.generic("Failed to update sending chain"))
+            do {
+                try sendingChain.updateKeysAfterDhRatchet(newChainKey: finalSenderKey)
+            } catch {
+                return .failure(.generic("Failed to update sending chain: \(error.localizedDescription)"))
             }
 
-            // Create receiving chain
-            let receivingChainResult = ProtocolChainStep.create(
-                stepType: .receiving,
-                initialChainKey: finalReceiverKey,
-                initialDhPrivateKey: persistentDhPrivateKey,
-                initialDhPublicKey: persistentDhPublicKey!,
-                cacheWindowSize: ratchetConfig.cacheWindowSize
-            )
-
-            guard case .success(let newReceivingChain) = receivingChainResult else {
-                return .failure(.generic("Failed to create receiving chain"))
+            let newReceivingChain: ProtocolChainStep
+            do {
+                newReceivingChain = try ProtocolChainStep.create(
+                    stepType: .receiving,
+                    initialChainKey: finalReceiverKey,
+                    initialDhPrivateKey: persistentDhPrivateKey,
+                    initialDhPublicKey: persistentDhPublicKey!,
+                    cacheWindowSize: ratchetConfig.cacheWindowSize
+                )
+            } catch {
+                return .failure(.generic("Failed to create receiving chain: \(error.localizedDescription)"))
             }
 
-            // Update connection state
             CryptographicHelpers.secureWipe(&rootKey)
             rootKey = Data(newRootKey)
             receivingChain = newReceivingChain
             peerDhPublicKey = Data(initialPeerDhPublicKey)
 
-            // Derive metadata encryption key
             _ = deriveMetadataEncryptionKey()
 
-            return .success(.value)
+            return .success(())
         } catch {
             return .failure(.generic("DH ratchet failed: \(error.localizedDescription)"))
         }
     }
 
-    // MARK: - Prepare Next Send Message
-    /// Prepares a message key for the next outgoing message
-    /// Migrated from: PrepareNextSendMessage()
     public func prepareNextSendMessage() -> Result<(ratchetKey: RatchetChainKey, includeDhKey: Bool, dhPublicKey: Data?), ProtocolFailure> {
         lock.lock()
         defer { lock.unlock() }
@@ -402,17 +363,17 @@ public final class ProtocolConnection {
             return .failure(.generic("Connection has been disposed"))
         }
 
-        // Check session timeout
         if Date().timeIntervalSince(createdAt) > sessionTimeout {
             return .failure(.generic("Session has expired"))
         }
 
-        // Get current sending index
-        guard case .success(let currentIndex) = sendingChain.getCurrentIndex() else {
-            return .failure(.generic("Failed to get current sending index"))
+        let currentIndex: UInt32
+        do {
+            currentIndex = try sendingChain.getCurrentIndex()
+        } catch {
+            return .failure(.generic("Failed to get current sending index: \(error.localizedDescription)"))
         }
 
-        // Check if we should perform DH ratchet
         let shouldRatchet = ratchetConfig.shouldRatchet(
             currentIndex: currentIndex + 1,
             lastRatchetTime: lastRatchetTime,
@@ -423,27 +384,24 @@ public final class ProtocolConnection {
             _ = performDhRatchet(isSender: true)
         }
 
-        // Derive key for next message
         let nextIndex = currentIndex + 1
-        let keyResult = sendingChain.getOrDeriveKeyFor(targetIndex: nextIndex)
-
-        guard case .success(let ratchetKey) = keyResult else {
-            if case .failure(let error) = keyResult {
-                return .failure(error)
-            }
-            return .failure(.generic("Failed to derive sending key"))
+        let ratchetKey: RatchetChainKey
+        do {
+            ratchetKey = try sendingChain.getOrDeriveKeyFor(targetIndex: nextIndex)
+        } catch {
+            return .failure(.generic("Failed to derive sending key: \(error.localizedDescription)"))
         }
 
-        // Update sending index
-        _ = sendingChain.setCurrentIndex(nextIndex)
+        do {
+            try sendingChain.setCurrentIndex(nextIndex)
+        } catch {
+            return .failure(.generic("Failed to update sending index: \(error.localizedDescription)"))
+        }
 
         let dhPublicKey = shouldRatchet ? sendingDhPublicKey : nil
         return .success((ratchetKey, shouldRatchet, dhPublicKey))
     }
 
-    // MARK: - Process Received Message
-    /// Processes a received message at a specific ratchet index
-    /// Migrated from: ProcessReceivedMessage()
     public func processReceivedMessage(receivedIndex: UInt32) -> Result<RatchetChainKey, ProtocolFailure> {
         lock.lock()
         defer { lock.unlock() }
@@ -452,7 +410,6 @@ public final class ProtocolConnection {
             return .failure(.generic("Connection has been disposed"))
         }
 
-        // Check session timeout
         if Date().timeIntervalSince(createdAt) > sessionTimeout {
             return .failure(.generic("Session has expired"))
         }
@@ -461,40 +418,49 @@ public final class ProtocolConnection {
             return .failure(.generic("Receiving chain not initialized"))
         }
 
-        // Try to recover from skipped messages
-        if case .success(let recoveredKey) = ratchetRecovery.tryRecoverMessageKey(messageIndex: receivedIndex),
-           case .some(let key) = recoveredKey {
-            return .success(key)
+        if let recoveredKey = ratchetRecovery.tryRecoverMessageKey(messageIndex: receivedIndex) {
+            return .success(recoveredKey)
         }
 
-        // Get current receiving index
-        guard case .success(let currentIndex) = receivingChain.getCurrentIndex() else {
-            return .failure(.generic("Failed to get current receiving index"))
+        let currentIndex: UInt32
+        do {
+            currentIndex = try receivingChain.getCurrentIndex()
+        } catch {
+            return .failure(.generic("Failed to get current receiving index: \(error.localizedDescription)"))
         }
 
-        // Handle skipped messages
         if receivedIndex > currentIndex + 1 {
-            guard case .success(let chainKey) = receivingChain.getCurrentChainKey() else {
-                return .failure(.generic("Failed to get current chain key"))
+            let chainKey: Data
+            do {
+                chainKey = try receivingChain.getCurrentChainKey()
+            } catch {
+                return .failure(.generic("Failed to get current chain key: \(error.localizedDescription)"))
             }
 
-            _ = ratchetRecovery.storeSkippedMessageKeys(
-                currentChainKey: chainKey,
-                fromIndex: currentIndex + 1,
-                toIndex: receivedIndex
-            )
+            do {
+                try ratchetRecovery.storeSkippedMessageKeys(
+                    currentChainKey: chainKey,
+                    fromIndex: currentIndex + 1,
+                    toIndex: receivedIndex
+                )
+            } catch {
+                Log.warning("[ProtocolConnection] Failed to store skipped message keys: \(error.localizedDescription)")
+            }
         }
 
-        // Derive key for received message index
-        let keyResult = receivingChain.getOrDeriveKeyFor(targetIndex: receivedIndex)
-        guard case .success(let ratchetKey) = keyResult else {
-            return .failure(.generic("Failed to derive receiving key"))
+        let ratchetKey: RatchetChainKey
+        do {
+            ratchetKey = try receivingChain.getOrDeriveKeyFor(targetIndex: receivedIndex)
+        } catch {
+            return .failure(.generic("Failed to derive receiving key: \(error.localizedDescription)"))
         }
 
-        // Update receiving index
-        _ = receivingChain.setCurrentIndex(receivedIndex)
+        do {
+            try receivingChain.setCurrentIndex(receivedIndex)
+        } catch {
+            return .failure(.generic("Failed to update receiving index: \(error.localizedDescription)"))
+        }
 
-        // Cleanup old recovery keys
         if receivedIndex > 1000 {
             ratchetRecovery.cleanupOldKeys(beforeIndex: receivedIndex - 1000)
         }
@@ -502,10 +468,7 @@ public final class ProtocolConnection {
         return .success(ratchetKey)
     }
 
-    // MARK: - Perform Receiving Ratchet
-    /// Performs a DH ratchet when receiving a new DH public key from peer
-    /// Migrated from: PerformReceivingRatchet()
-    public func performReceivingRatchet(receivedDhPublicKey: Data) -> Result<Unit, ProtocolFailure> {
+    public func performReceivingRatchet(receivedDhPublicKey: Data) -> Result<Void, ProtocolFailure> {
         lock.lock()
         defer { lock.unlock() }
 
@@ -520,13 +483,15 @@ public final class ProtocolConnection {
         receivedNewDhKey = true
         peerDhPublicKey = Data(receivedDhPublicKey)
 
-        // Perform DH ratchet if conditions are met
         guard let receivingChain = receivingChain else {
             return .failure(.generic("Receiving chain not initialized"))
         }
 
-        guard case .success(let currentIndex) = receivingChain.getCurrentIndex() else {
-            return .failure(.generic("Failed to get receiving index"))
+        let currentIndex: UInt32
+        do {
+            currentIndex = try receivingChain.getCurrentIndex()
+        } catch {
+            return .failure(.generic("Failed to get receiving index: \(error.localizedDescription)"))
         }
 
         let shouldRatchet = isFirstReceivingRatchet ||
@@ -537,12 +502,10 @@ public final class ProtocolConnection {
             return performDhRatchet(isSender: false, receivedDhPublicKey: receivedDhPublicKey)
         }
 
-        return .success(.value)
+        return .success(())
     }
 
-    // MARK: - Perform DH Ratchet
-    /// Performs the Double Ratchet algorithm DH step
-    private func performDhRatchet(isSender: Bool, receivedDhPublicKey: Data? = nil) -> Result<Unit, ProtocolFailure> {
+    private func performDhRatchet(isSender: Bool, receivedDhPublicKey: Data? = nil) -> Result<Void, ProtocolFailure> {
         guard let peerKey = isSender ? peerDhPublicKey : receivedDhPublicKey else {
             return .failure(.generic("Peer DH public key not available"))
         }
@@ -550,68 +513,57 @@ public final class ProtocolConnection {
         do {
             let x25519 = X25519KeyExchange()
 
-            // Perform DH key agreement
             let dhSecret = try x25519.performKeyAgreementWithBytes(
                 privateKeyBytes: sendingDhPrivateKey,
                 publicKeyBytes: peerKey
             )
 
-            // Derive new root key and chain key using HKDF
             let dhRatchetInfo = Data("ecliptix-dh-ratchet".utf8)
             let derived = try HKDFKeyDerivation.deriveKey(
                 inputKeyMaterial: dhSecret,
                 salt: rootKey,
                 info: dhRatchetInfo,
-                outputByteCount: 64 // 32 for root key + 32 for chain key
+                outputByteCount: 64
             )
 
             let newRootKey = derived.prefix(32)
             let newChainKey = derived.suffix(32)
 
-            // Update root key
             CryptographicHelpers.secureWipe(&rootKey)
             rootKey = Data(newRootKey)
 
             if isSender {
-                // Generate new DH key pair for sending
+
                 let (newPrivateKey, newPublicKey) = x25519.generateKeyPair()
                 let newPrivateKeyBytes = x25519.privateKeyToBytes(newPrivateKey)
                 let newPublicKeyBytes = x25519.publicKeyToBytes(newPublicKey)
 
-                // Update sending chain
-                _ = sendingChain.updateKeysAfterDhRatchet(
+                try sendingChain.updateKeysAfterDhRatchet(
                     newChainKey: Data(newChainKey),
                     newDhPrivateKey: newPrivateKeyBytes,
                     newDhPublicKey: newPublicKeyBytes
                 )
 
-                // Update stored DH keys
                 CryptographicHelpers.secureWipe(&sendingDhPrivateKey)
                 sendingDhPrivateKey = newPrivateKeyBytes
                 sendingDhPublicKey = newPublicKeyBytes
             } else {
-                // Update receiving chain
-                _ = receivingChain?.updateKeysAfterDhRatchet(newChainKey: Data(newChainKey))
+                try receivingChain?.updateKeysAfterDhRatchet(newChainKey: Data(newChainKey))
                 peerDhPublicKey = Data(peerKey)
             }
 
-            // Update ratchet state
             lastRatchetTime = Date()
             receivedNewDhKey = false
             replayProtection.onRatchetRotation()
 
-            // Derive new metadata encryption key
             _ = deriveMetadataEncryptionKey()
 
-            return .success(.value)
+            return .success(())
         } catch {
             return .failure(.generic("DH ratchet failed: \(error.localizedDescription)"))
         }
     }
 
-    // MARK: - Get Metadata Encryption Key
-    /// Gets the metadata encryption key derived from root key
-    /// Migrated from: GetMetadataEncryptionKey()
     public func getMetadataEncryptionKey() -> Result<Data, ProtocolFailure> {
         lock.lock()
         defer { lock.unlock() }
@@ -627,10 +579,7 @@ public final class ProtocolConnection {
         return deriveMetadataEncryptionKey()
     }
 
-    // MARK: - Check Replay Protection
-    /// Checks if a message nonce has been seen before (replay attack prevention)
-    /// Migrated from: CheckReplayProtection()
-    public func checkReplayProtection(nonce: Data, messageIndex: UInt32) -> Result<Unit, ProtocolFailure> {
+    public func checkReplayProtection(nonce: Data, messageIndex: UInt32) -> Result<Void, ProtocolFailure> {
         guard !isDisposed else {
             return .failure(.generic("Connection has been disposed"))
         }
@@ -642,8 +591,6 @@ public final class ProtocolConnection {
         )
     }
 
-    // MARK: - Get Current Sender DH Public Key
-    /// Gets our current sending DH public key to include in messages
     public func getCurrentSenderDhPublicKey() -> Result<Data?, ProtocolFailure> {
         lock.lock()
         defer { lock.unlock() }
@@ -654,38 +601,31 @@ public final class ProtocolConnection {
 
         return .success(Data(sendingDhPublicKey))
     }
-
-    // MARK: - Get Sending Chain Index
-    public func getSendingChainIndex() -> Result<UInt32, ProtocolFailure> {
+    public func getSendingChainIndex() throws -> UInt32 {
         lock.lock()
         defer { lock.unlock() }
 
         guard !isDisposed else {
-            return .failure(.generic("Connection has been disposed"))
+            throw ProtocolFailure.generic("Connection has been disposed")
         }
 
-        return sendingChain.getCurrentIndex()
+        return try sendingChain.getCurrentIndex()
     }
-
-    // MARK: - Get Receiving Chain Index
-    public func getReceivingChainIndex() -> Result<UInt32, ProtocolFailure> {
+    public func getReceivingChainIndex() throws -> UInt32 {
         lock.lock()
         defer { lock.unlock() }
 
         guard !isDisposed else {
-            return .failure(.generic("Connection has been disposed"))
+            throw ProtocolFailure.generic("Connection has been disposed")
         }
 
         guard let chain = receivingChain else {
-            return .failure(.generic("No receiving chain"))
+            throw ProtocolFailure.generic("No receiving chain")
         }
 
-        return chain.getCurrentIndex()
+        return try chain.getCurrentIndex()
     }
 
-    // MARK: - Generate Nonce
-    /// Generates a unique nonce for message encryption
-    /// Migrated from: GenerateNextNonce()
     public func generateNonce() -> Data {
         lock.lock()
         defer { lock.unlock() }
@@ -693,21 +633,17 @@ public final class ProtocolConnection {
         nonceCounter += 1
         var nonce = Data(count: CryptographicConstants.aesGcmNonceSize)
 
-        // First 8 bytes: counter (little-endian)
         var counter = nonceCounter.littleEndian
         withUnsafeBytes(of: &counter) { buffer in
             nonce.replaceSubrange(0..<8, with: buffer)
         }
 
-        // Last 4 bytes: random
         let randomBytes = CryptographicHelpers.generateRandomBytes(count: 4)
         nonce.replaceSubrange(8..<12, with: randomBytes)
 
         return nonce
     }
-
-    // MARK: - Set Peer Bundle
-    public func setPeerBundle(_ bundle: PublicKeyBundle) -> Result<Unit, ProtocolFailure> {
+    public func setPeerBundle(_ bundle: PublicKeyBundle) -> Result<Void, ProtocolFailure> {
         lock.lock()
         defer { lock.unlock() }
 
@@ -716,10 +652,8 @@ public final class ProtocolConnection {
         }
 
         peerBundle = bundle
-        return .success(.value)
+        return .success(())
     }
-
-    // MARK: - Get Peer Bundle
     public func getPeerBundle() -> Result<PublicKeyBundle, ProtocolFailure> {
         lock.lock()
         defer { lock.unlock() }
@@ -735,8 +669,6 @@ public final class ProtocolConnection {
         return .success(bundle)
     }
 
-    // MARK: - Private Helpers
-
     private func deriveMetadataEncryptionKey() -> Result<Data, ProtocolFailure> {
         do {
             let key = try HKDFKeyDerivation.deriveMetadataEncryptionKey(from: rootKey)
@@ -746,19 +678,12 @@ public final class ProtocolConnection {
             return .failure(.generic("Failed to derive metadata encryption key: \(error.localizedDescription)"))
         }
     }
-
-    // MARK: - Dispose
     public func dispose() {
         lock.lock()
         defer { lock.unlock() }
 
         guard !isDisposed else { return }
         isDisposed = true
-
-        sendingChain.dispose()
-        receivingChain?.dispose()
-        replayProtection.dispose()
-        ratchetRecovery.dispose()
 
         CryptographicHelpers.secureWipe(&rootKey)
         CryptographicHelpers.secureWipe(&sendingDhPrivateKey)
@@ -773,8 +698,6 @@ public final class ProtocolConnection {
         }
     }
 }
-
-// MARK: - Debug Description
 extension ProtocolConnection: CustomDebugStringConvertible {
     public var debugDescription: String {
         return "ProtocolConnection(id: \(id), isInitiator: \(isInitiator), hasReceivingChain: \(receivingChain != nil))"

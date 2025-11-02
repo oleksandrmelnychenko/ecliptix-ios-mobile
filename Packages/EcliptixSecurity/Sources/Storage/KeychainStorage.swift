@@ -1,10 +1,8 @@
+import EcliptixCore
 import Foundation
 import Security
-import EcliptixCore
 
-// MARK: - Keychain Storage Implementation
-/// Provides secure storage using iOS Keychain Services
-public final class KeychainStorage {
+public final class KeychainStorage: @unchecked Sendable {
     private let service: String
     private let accessGroup: String?
 
@@ -12,10 +10,8 @@ public final class KeychainStorage {
         self.service = service
         self.accessGroup = accessGroup
     }
-
-    // MARK: - Save to Keychain
     public func save(_ data: Data, forKey key: String) throws {
-        // Delete existing item if present
+
         _ = try? delete(forKey: key)
 
         var query = baseQuery(for: key)
@@ -28,8 +24,6 @@ public final class KeychainStorage {
             throw SecurityError.keychainError(status: status)
         }
     }
-
-    // MARK: - Retrieve from Keychain
     public func retrieve(forKey key: String) throws -> Data? {
         var query = baseQuery(for: key)
         query[kSecReturnData as String] = true
@@ -52,8 +46,6 @@ public final class KeychainStorage {
 
         return data
     }
-
-    // MARK: - Delete from Keychain
     public func delete(forKey key: String) throws {
         let query = baseQuery(for: key)
         let status = SecItemDelete(query as CFDictionary)
@@ -62,8 +54,6 @@ public final class KeychainStorage {
             throw SecurityError.keychainError(status: status)
         }
     }
-
-    // MARK: - Check if Key Exists
     public func exists(forKey key: String) -> Bool {
         var query = baseQuery(for: key)
         query[kSecReturnData as String] = false
@@ -72,8 +62,6 @@ public final class KeychainStorage {
         let status = SecItemCopyMatching(query as CFDictionary, nil)
         return status == errSecSuccess
     }
-
-    // MARK: - Base Query
     private func baseQuery(for key: String) -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -88,8 +76,6 @@ public final class KeychainStorage {
         return query
     }
 }
-
-// MARK: - SecureStorage Protocol Conformance
 extension KeychainStorage: SecureStorage {
     public func save<T: Codable>(_ value: T, forKey key: String) throws {
         let encoder = JSONEncoder()

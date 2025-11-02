@@ -1,12 +1,16 @@
 import SwiftUI
 
 struct AuthenticationView: View {
+    @Environment(\.welcomeService) private var welcomeService
+    @Environment(\.signInService) private var signInService
+
     @State private var selectedTab: AuthTab = .welcome
 
     enum AuthTab {
         case welcome
         case signIn
         case register
+        case forgotPassword
     }
 
     var body: some View {
@@ -22,13 +26,20 @@ struct AuthenticationView: View {
                 switch selectedTab {
                 case .welcome:
                     WelcomeView(
+                        service: welcomeService,
                         onSignIn: { selectedTab = .signIn },
                         onRegister: { selectedTab = .register }
                     )
                 case .signIn:
-                    SignInView(onBack: { selectedTab = .welcome })
+                    SignInView(
+                        service: signInService,
+                        onBack: { selectedTab = .welcome },
+                        onForgotPassword: { selectedTab = .forgotPassword }
+                    )
                 case .register:
                     RegistrationView(onBack: { selectedTab = .welcome })
+                case .forgotPassword:
+                    PasswordRecoveryView(onBack: { selectedTab = .signIn })
                 }
             }
         }
