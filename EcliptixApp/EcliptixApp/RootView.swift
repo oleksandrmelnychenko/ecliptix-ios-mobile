@@ -42,5 +42,4 @@ struct RootView: View {
 
 #Preview {
     RootView()
-        .environmentObject(AuthenticationStateManager())
 }

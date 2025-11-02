@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct MainView: View {
-    @EnvironmentObject var authStateManager: AuthenticationStateManager
+    @Environment(\.applicationStateManager) private var stateManager: ApplicationStateManager
 
     var body: some View {
         NavigationStack {
@@ -51,12 +51,11 @@ struct MainView: View {
 
     private func handleLogout() {
         Task {
-            await authStateManager.updateState(.anonymous)
+            await stateManager.transitionToAnonymous()
         }
     }
 }
 
 #Preview {
     MainView()
-        .environmentObject(AuthenticationStateManager())
 }
