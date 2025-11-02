@@ -1,0 +1,57 @@
+name: EcliptixApp
+options:
+  bundleIdPrefix: com.ecliptix
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+
+targets:
+  EcliptixApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+
+    sources:
+      - path: EcliptixApp
+        excludes:
+          - "**/.DS_Store"
+
+    dependencies: []
+
+    settings:
+      base:
+        PRODUCT_NAME: EcliptixApp
+        PRODUCT_BUNDLE_IDENTIFIER: com.ecliptix.app
+        INFOPLIST_FILE: EcliptixApp/Info.plist
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "6.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_OPTIMIZATION_LEVEL: -Onone
+        ENABLE_PREVIEWS: true
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        OTHER_SWIFT_FLAGS: "-Xfrontend -warn-long-function-bodies=100 -Xfrontend -warn-long-expression-type-checking=100"
+
+      debug:
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+
+      release:
+        SWIFT_OPTIMIZATION_LEVEL: -O
+
+schemes:
+  EcliptixApp:
+    build:
+      targets:
+        EcliptixApp: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

@@ -78,8 +78,8 @@ let package = Package(
                 "EcliptixCore",
                 "EcliptixNetworking",
                 "EcliptixSecurity",
-                "EcliptixOPAQUE",
                 "EcliptixProto",
+                "EcliptixOPAQUE",
             ],
             path: "Packages/EcliptixAuthentication/Sources"),
 
