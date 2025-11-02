@@ -1,29 +1,16 @@
 import Foundation
-import Security
-import EcliptixCore
+@preconcurrency import Security
+@preconcurrency import CoreFoundation
 
-// MARK: - Keychain Storage
-/// Secure storage for sensitive data using iOS Keychain
-/// Migrated from: Ecliptix.Core/Infrastructure/Storage/SecureStorage.cs
-@MainActor
-public final class KeychainStorage {
-
-    // MARK: - Configuration
+public final class KeychainStorage: @unchecked Sendable {
 
     private let configuration: KeychainConfiguration
-
-    // MARK: - Initialization
 
     public init(configuration: KeychainConfiguration = .default) {
         self.configuration = configuration
     }
 
-    // MARK: - Storage Operations
-
-    /// Stores data securely in keychain
-    /// Migrated from: StoreSecureAsync()
-    public func store(_ data: Data, forKey key: String) -> Result<Void, KeychainError> {
-        // Create query for storing
+    public func store(_ data: Data, forKey key: String) throws {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: configuration.serviceName,
@@ -32,48 +19,42 @@ public final class KeychainStorage {
             kSecAttrAccessible as String: configuration.accessibility
         ]
 
-        // Add access group if specified
         if let accessGroup = configuration.accessGroup {
             query[kSecAttrAccessGroup as String] = accessGroup
         }
 
-        // Delete existing item first
-        _ = delete(forKey: key)
+        try? delete(forKey: key)
 
-        // Add new item
         let status = SecItemAdd(query as CFDictionary, nil)
 
         guard status == errSecSuccess else {
             Log.error("[Keychain] Failed to store item for key: \(key), status: \(status)")
-            return .failure(.storeFailed(status: status))
+            throw KeychainError.storeFailed(status: status)
         }
 
-        Log.debug("[Keychain] ✅ Stored item for key: \(key)")
-        return .success(())
+        Log.debug("[Keychain] [OK] Stored item for key: \(key)")
     }
 
-    /// Stores string securely in keychain
-    public func store(_ string: String, forKey key: String) -> Result<Void, KeychainError> {
+    public func store(_ string: String, forKey key: String) throws {
         guard let data = string.data(using: .utf8) else {
-            return .failure(.encodingFailed)
+            throw KeychainError.encodingFailed
         }
-        return store(data, forKey: key)
+        try store(data, forKey: key)
     }
 
-    /// Stores Codable object securely in keychain
-    public func store<T: Encodable>(_ object: T, forKey key: String) -> Result<Void, KeychainError> {
+    public func store<T: Encodable>(_ object: T, forKey key: String) throws {
         do {
             let data = try JSONEncoder().encode(object)
-            return store(data, forKey: key)
+            try store(data, forKey: key)
+        } catch let error as KeychainError {
+            throw error
         } catch {
             Log.error("[Keychain] Failed to encode object for key: \(key), error: \(error)")
-            return .failure(.encodingFailed)
+            throw KeychainError.encodingFailed
         }
     }
 
-    /// Retrieves data from keychain
-    /// Migrated from: RetrieveSecureAsync()
-    public func retrieve(forKey key: String) -> Result<Data, KeychainError> {
+    public func retrieve(forKey key: String) throws -> Data {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: configuration.serviceName,
@@ -82,7 +63,6 @@ public final class KeychainStorage {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
 
-        // Add access group if specified
         if let accessGroup = configuration.accessGroup {
             query[kSecAttrAccessGroup as String] = accessGroup
         }
@@ -92,59 +72,46 @@ public final class KeychainStorage {
 
         guard status == errSecSuccess else {
             if status == errSecItemNotFound {
-                return .failure(.notFound)
+                throw KeychainError.notFound
             }
             Log.error("[Keychain] Failed to retrieve item for key: \(key), status: \(status)")
-            return .failure(.retrieveFailed(status: status))
+            throw KeychainError.retrieveFailed(status: status)
         }
 
         guard let data = result as? Data else {
-            return .failure(.invalidData)
+            throw KeychainError.invalidData
         }
 
-        Log.debug("[Keychain] ✅ Retrieved item for key: \(key)")
-        return .success(data)
+        Log.debug("[Keychain] [OK] Retrieved item for key: \(key)")
+        return data
     }
 
-    /// Retrieves string from keychain
-    public func retrieveString(forKey key: String) -> Result<String, KeychainError> {
-        switch retrieve(forKey: key) {
-        case .success(let data):
-            guard let string = String(data: data, encoding: .utf8) else {
-                return .failure(.decodingFailed)
-            }
-            return .success(string)
-        case .failure(let error):
-            return .failure(error)
+    public func retrieveString(forKey key: String) throws -> String {
+        let data = try retrieve(forKey: key)
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw KeychainError.decodingFailed
         }
+        return string
     }
 
-    /// Retrieves Codable object from keychain
-    public func retrieve<T: Decodable>(forKey key: String) -> Result<T, KeychainError> {
-        switch retrieve(forKey: key) {
-        case .success(let data):
-            do {
-                let object = try JSONDecoder().decode(T.self, from: data)
-                return .success(object)
-            } catch {
-                Log.error("[Keychain] Failed to decode object for key: \(key), error: \(error)")
-                return .failure(.decodingFailed)
-            }
-        case .failure(let error):
-            return .failure(error)
+    public func retrieve<T: Decodable>(forKey key: String) throws -> T {
+        let data = try retrieve(forKey: key)
+        do {
+            let object = try JSONDecoder().decode(T.self, from: data)
+            return object
+        } catch {
+            Log.error("[Keychain] Failed to decode object for key: \(key), error: \(error)")
+            throw KeychainError.decodingFailed
         }
     }
 
-    /// Deletes item from keychain
-    /// Migrated from: DeleteSecureAsync()
-    public func delete(forKey key: String) -> Result<Void, KeychainError> {
+    public func delete(forKey key: String) throws {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: configuration.serviceName,
             kSecAttrAccount as String: key
         ]
 
-        // Add access group if specified
         if let accessGroup = configuration.accessGroup {
             query[kSecAttrAccessGroup as String] = accessGroup
         }
@@ -153,23 +120,19 @@ public final class KeychainStorage {
 
         guard status == errSecSuccess || status == errSecItemNotFound else {
             Log.error("[Keychain] Failed to delete item for key: \(key), status: \(status)")
-            return .failure(.deleteFailed(status: status))
+            throw KeychainError.deleteFailed(status: status)
         }
 
-        Log.debug("[Keychain] 🗑️ Deleted item for key: \(key)")
-        return .success(())
+        Log.debug("[Keychain]  Deleted item for key: \(key)")
     }
 
-    /// Updates existing item in keychain
-    /// Migrated from: UpdateSecureAsync()
-    public func update(_ data: Data, forKey key: String) -> Result<Void, KeychainError> {
+    public func update(_ data: Data, forKey key: String) throws {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: configuration.serviceName,
             kSecAttrAccount as String: key
         ]
 
-        // Add access group if specified
         if let accessGroup = configuration.accessGroup {
             query[kSecAttrAccessGroup as String] = accessGroup
         }
@@ -182,36 +145,32 @@ public final class KeychainStorage {
 
         guard status == errSecSuccess else {
             if status == errSecItemNotFound {
-                // Item doesn't exist, store it instead
-                return store(data, forKey: key)
+
+                try store(data, forKey: key)
+                return
             }
             Log.error("[Keychain] Failed to update item for key: \(key), status: \(status)")
-            return .failure(.updateFailed(status: status))
+            throw KeychainError.updateFailed(status: status)
         }
 
-        Log.debug("[Keychain] ✅ Updated item for key: \(key)")
-        return .success(())
+        Log.debug("[Keychain] [OK] Updated item for key: \(key)")
     }
 
-    /// Checks if item exists in keychain
     public func exists(forKey key: String) -> Bool {
-        switch retrieve(forKey: key) {
-        case .success:
+        do {
+            _ = try retrieve(forKey: key)
             return true
-        case .failure:
+        } catch {
             return false
         }
     }
 
-    /// Deletes all items for this service
-    /// Migrated from: ClearAllSecureAsync()
-    public func deleteAll() -> Result<Void, KeychainError> {
+    public func deleteAll() throws {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: configuration.serviceName
         ]
 
-        // Add access group if specified
         if let accessGroup = configuration.accessGroup {
             query[kSecAttrAccessGroup as String] = accessGroup
         }
@@ -220,17 +179,13 @@ public final class KeychainStorage {
 
         guard status == errSecSuccess || status == errSecItemNotFound else {
             Log.error("[Keychain] Failed to delete all items, status: \(status)")
-            return .failure(.deleteFailed(status: status))
+            throw KeychainError.deleteFailed(status: status)
         }
 
-        Log.info("[Keychain] 🗑️ Deleted all items for service: \(configuration.serviceName)")
-        return .success(())
+        Log.info("[Keychain]  Deleted all items for service: \(configuration.serviceName)")
     }
 
-    // MARK: - Key Management
-
-    /// Lists all keys stored in keychain for this service
-    public func allKeys() -> Result<[String], KeychainError> {
+    public func allKeys() throws -> [String] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: configuration.serviceName,
@@ -238,7 +193,6 @@ public final class KeychainStorage {
             kSecMatchLimit as String: kSecMatchLimitAll
         ]
 
-        // Add access group if specified
         if let accessGroup = configuration.accessGroup {
             query[kSecAttrAccessGroup as String] = accessGroup
         }
@@ -248,34 +202,27 @@ public final class KeychainStorage {
 
         guard status == errSecSuccess else {
             if status == errSecItemNotFound {
-                return .success([])
+                return []
             }
             Log.error("[Keychain] Failed to list keys, status: \(status)")
-            return .failure(.retrieveFailed(status: status))
+            throw KeychainError.retrieveFailed(status: status)
         }
 
         guard let items = result as? [[String: Any]] else {
-            return .success([])
+            return []
         }
 
         let keys = items.compactMap { $0[kSecAttrAccount as String] as? String }
-        return .success(keys)
+        return keys
     }
 }
 
-// MARK: - Configuration
+public struct KeychainConfiguration: @unchecked Sendable {
 
-/// Configuration for keychain storage
-/// Migrated from: KeychainConfiguration.cs
-public struct KeychainConfiguration {
-
-    /// Service name for keychain items
     public let serviceName: String
 
-    /// Access group for sharing between apps (optional)
     public let accessGroup: String?
 
-    /// Accessibility level for keychain items
     public let accessibility: CFString
 
     public init(
@@ -288,30 +235,18 @@ public struct KeychainConfiguration {
         self.accessibility = accessibility
     }
 
-    // MARK: - Presets
-
-    /// Default configuration (when unlocked, this device only)
     public static let `default` = KeychainConfiguration()
 
-    /// After first unlock (survives reboot)
+    @available(*, deprecated, message: "Use default configuration for better security")
     public static let afterFirstUnlock = KeychainConfiguration(
         accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     )
 
-    /// Always accessible (not recommended for sensitive data)
-    public static let always = KeychainConfiguration(
-        accessibility: kSecAttrAccessibleAlways
-    )
-
-    /// With passcode set only (most secure)
     public static let whenPasscodeSet = KeychainConfiguration(
         accessibility: kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly
     )
 }
 
-// MARK: - Errors
-
-/// Keychain operation errors
 public enum KeychainError: LocalizedError {
     case storeFailed(status: OSStatus)
     case retrieveFailed(status: OSStatus)
@@ -344,9 +279,6 @@ public enum KeychainError: LocalizedError {
     }
 }
 
-// MARK: - Convenience Keys
-
-/// Common keychain keys for Ecliptix app
 public extension KeychainStorage {
     enum Key {
         public static let identityKeys = "ecliptix.identity.keys"

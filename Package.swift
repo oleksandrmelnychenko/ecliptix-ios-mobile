@@ -1,16 +1,15 @@
-// swift-tools-version: 5.9
-// The swift-tools-version declares the minimum version of Swift required to build this package.
+// swift-tools-version: 6.0
 
 import PackageDescription
 
 let package = Package(
     name: "EcliptixWorkspace",
     platforms: [
-        .iOS(.v16),
-        .macOS(.v13)
+        .iOS("18.0"),
+        .macOS("15.0")
     ],
     products: [
-        // Products define the executables and libraries a package produces, making them visible to other packages.
+
         .library(
             name: "EcliptixCore",
             targets: ["EcliptixCore"]),
@@ -23,45 +22,56 @@ let package = Package(
         .library(
             name: "EcliptixAuthentication",
             targets: ["EcliptixAuthentication"]),
+        .library(
+            name: "EcliptixProto",
+            targets: ["EcliptixProto"]),
+        .library(
+            name: "EcliptixOPAQUE",
+            targets: ["EcliptixOPAQUE"]),
+
     ],
     dependencies: [
-        // Dependencies declare other packages that this package depends on.
-        .package(url: "https://github.com/grpc/grpc-swift.git", from: "1.23.0"),
-        .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.27.0"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+
+        .package(url: "https://github.com/grpc/grpc-swift-2.git", from: "2.1.0"),
+        .package(url: "https://github.com/grpc/grpc-swift-protobuf.git", from: "2.0.0"),
+        .package(url: "https://github.com/grpc/grpc-swift-nio-transport.git", from: "2.2.0"),
+        .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.32.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.15.1"),
     ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
+
         .target(
             name: "EcliptixCore",
             dependencies: [
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
-            ]),
-        .testTarget(
-            name: "EcliptixCoreTests",
-            dependencies: ["EcliptixCore"]),
-
+            ],
+            path: "Packages/EcliptixCore/Sources"),
         .target(
             name: "EcliptixNetworking",
             dependencies: [
                 "EcliptixCore",
-                .product(name: "GRPC", package: "grpc-swift"),
+                "EcliptixSecurity",
+                "EcliptixProto",
+                "Clibsodium",
+                .product(name: "GRPCCore", package: "grpc-swift-2"),
+                .product(name: "GRPCNIOTransportHTTP2", package: "grpc-swift-nio-transport"),
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
-            ]),
-        .testTarget(
-            name: "EcliptixNetworkingTests",
-            dependencies: ["EcliptixNetworking"]),
+            ],
+            path: "Packages/EcliptixNetworking/Sources"),
 
         .target(
             name: "EcliptixSecurity",
             dependencies: [
                 "EcliptixCore",
+                "EcliptixProto",
+                "Clibsodium",
                 .product(name: "Crypto", package: "swift-crypto"),
-            ]),
+            ],
+            path: "Packages/EcliptixSecurity/Sources"),
         .testTarget(
             name: "EcliptixSecurityTests",
-            dependencies: ["EcliptixSecurity"]),
+            dependencies: ["EcliptixSecurity"],
+            path: "Packages/EcliptixSecurity/Tests"),
 
         .target(
             name: "EcliptixAuthentication",
@@ -69,9 +79,88 @@ let package = Package(
                 "EcliptixCore",
                 "EcliptixNetworking",
                 "EcliptixSecurity",
-            ]),
-        .testTarget(
-            name: "EcliptixAuthenticationTests",
-            dependencies: ["EcliptixAuthentication"]),
+                "EcliptixOPAQUE",
+                "EcliptixProto",
+            ],
+            path: "Packages/EcliptixAuthentication/Sources"),
+
+        .target(
+            name: "EcliptixProto",
+            dependencies: [
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+                .product(name: "GRPCCore", package: "grpc-swift-2"),
+                .product(name: "GRPCProtobuf", package: "grpc-swift-protobuf"),
+            ],
+            path: "Protobufs/Generated"
+        ),
+
+        // OPAQUE C wrapper - pure C header for Swift interop
+        .target(
+            name: "COpaqueClient",
+            path: "Packages/EcliptixOPAQUE/Sources/COpaqueClient"
+        ),
+
+        // OPAQUE client library - iOS static library with C API
+        // Note: libsodium is statically linked into libopaque_client.a, no XCFramework dependency needed
+        .target(
+            name: "OpaqueClient",
+            dependencies: ["COpaqueClient"],
+            path: "Packages/EcliptixOPAQUE",
+            sources: ["Sources/OpaqueClient"],
+            linkerSettings: [
+                .linkedLibrary("c++"),
+                .unsafeFlags([
+                    "-L\(Context.packageDirectory)/Packages/EcliptixOPAQUE/lib",
+                    "-lopaque_client"
+                ])
+            ]
+        ),
+
+        // Certificate Pinning C header - pure C API
+        .target(
+            name: "CCertificatePinning",
+            path: "Packages/EcliptixCertificatePinning/Sources/CCertificatePinning"
+        ),
+
+        // Certificate Pinning client library - iOS static library
+        .target(
+            name: "CertificatePinning",
+            dependencies: ["CCertificatePinning"],
+            path: "Packages/EcliptixCertificatePinning",
+            exclude: ["include"],
+            sources: [],
+            linkerSettings: [
+                .linkedLibrary("c++"),
+                .unsafeFlags([
+                    "-L\(Context.packageDirectory)/Packages/EcliptixCertificatePinning/lib",
+                    "-lcertificate_pinning_client"
+                ])
+            ]
+        ),
+        .binaryTarget(
+            name: "Clibsodium",
+            path: "ThirdParty/xcframeworks/Clibsodium.xcframework"
+        ),
+
+        .binaryTarget(
+            name: "ecliptix_client",
+            path: "ThirdParty/xcframeworks/ecliptix_client.xcframework"
+        ),
+        .binaryTarget(
+            name: "OpenSSLCrypto",
+            path: "ThirdParty/xcframeworks/OpenSSL-crypto.xcframework"
+        ),
+
+        .target(
+            name: "EcliptixOPAQUE",
+            dependencies: [
+                "EcliptixCore",
+                "COpaqueClient",
+                "OpaqueClient",
+                "Clibsodium",
+            ],
+            path: "Packages/EcliptixOPAQUE/Sources/EcliptixOPAQUE"
+        ),
+
     ]
 )

@@ -1,143 +1,260 @@
-import Foundation
-import GRPC
 import EcliptixCore
+import Foundation
+import GRPCCore
+import GRPCProtobuf
 
-// MARK: - Membership Service Client
-/// Client for membership-related RPC calls (registration, auth, logout)
-/// Migrated from: Ecliptix.Core/Services/Network/Rpc/UnaryRpcServices.cs (membership methods)
-public final class MembershipServiceClient: BaseRPCService {
+@_exported import EcliptixProto
 
-    // TODO: Replace with generated protobuf client when available
-    // private let grpcClient: Ecliptix_Protobuf_Membership_MembershipServicesClient
-
-    // MARK: - Registration Init
-    /// Initiates OPAQUE registration
-    /// Migrated from: OpaqueRegistrationRecordRequestAsync()
-    public func registrationInit(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
-
-        return await executeSecureEnvelopeCall(
-            serviceType: .registrationInit,
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            // return try await self.grpcClient.registrationInit(request, callOptions: callOptions)
-
-            // Placeholder - will be replaced with actual gRPC call
-            throw NetworkError.unknown("Protobuf client not yet generated")
+@MainActor
+public final class MembershipServiceClient {
+    private let channelManager: GRPCChannelManager
+    private var grpcClient: Membership_MembershipServices.Client<HTTP2Transport>?
+    public init(channelManager: GRPCChannelManager) {
+        self.channelManager = channelManager
+        Log.info("[MembershipServiceClient] Initialized")
+    }
+    private func getClient() throws -> Membership_MembershipServices.Client<HTTP2Transport> {
+        if let client = grpcClient {
+            return client
         }
+
+        let grpcBaseClient = try channelManager.getClient()
+        let client = Membership_MembershipServices.Client(wrapping: grpcBaseClient)
+        grpcClient = client
+        return client
     }
 
-    // MARK: - Registration Complete
-    /// Completes OPAQUE registration
-    /// Migrated from: OpaqueRegistrationCompleteRequestAsync()
-    public func registrationComplete(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
+    public func opaqueRegistrationInit(
+        envelope: Common_SecureEnvelope
+    ) async throws -> Common_SecureEnvelope {
 
-        return await executeSecureEnvelopeCall(
-            serviceType: .registrationComplete,
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            throw NetworkError.unknown("Protobuf client not yet generated")
-        }
+        Log.info("[MembershipServiceClient] OPAQUE registration init")
+
+        let client = try getClient()
+        let request = ClientRequest(message: envelope)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(40)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.opaqueRegistrationInitRequest(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[MembershipServiceClient] [OK] OPAQUE registration init complete")
+        return response
     }
 
-    // MARK: - Sign In Init
-    /// Initiates OPAQUE sign-in
-    /// Migrated from: OpaqueSignInInitRequestAsync()
-    public func signInInit(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
+    public func opaqueRegistrationComplete(
+        envelope: Common_SecureEnvelope
+    ) async throws -> Common_SecureEnvelope {
 
-        return await executeSecureEnvelopeCall(
-            serviceType: .signInInit,
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            throw NetworkError.unknown("Protobuf client not yet generated")
-        }
+        Log.info("[MembershipServiceClient] OPAQUE registration complete")
+
+        let client = try getClient()
+        let request = ClientRequest(message: envelope)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(40)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.opaqueRegistrationCompleteRequest(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[MembershipServiceClient] [OK] OPAQUE registration completed")
+        return response
     }
 
-    // MARK: - Sign In Complete
-    /// Completes OPAQUE sign-in
-    /// Migrated from: OpaqueSignInCompleteRequestAsync()
-    public func signInComplete(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
+    public func opaqueRecoverySecretKeyInit(
+        envelope: Common_SecureEnvelope
+    ) async throws -> Common_SecureEnvelope {
 
-        return await executeSecureEnvelopeCall(
-            serviceType: .signInComplete,
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            throw NetworkError.unknown("Protobuf client not yet generated")
-        }
+        Log.info("[MembershipServiceClient] Recovery secret key init")
+
+        let client = try getClient()
+        let request = ClientRequest(message: envelope)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(35)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.opaqueRecoverySecretKeyInitRequest(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[MembershipServiceClient] [OK] Recovery secret key init complete")
+        return response
     }
 
-    // MARK: - Logout
-    /// Logs out the current user
-    /// Migrated from: LogoutAsync()
+    public func opaqueRecoverySecretKeyComplete(
+        envelope: Common_SecureEnvelope
+    ) async throws -> Common_SecureEnvelope {
+
+        Log.info("[MembershipServiceClient] Recovery secret key complete")
+
+        let client = try getClient()
+        let request = ClientRequest(message: envelope)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(35)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.opaqueRecoverySecretKeyCompleteRequest(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[MembershipServiceClient] [OK] Recovery secret key setup completed")
+        return response
+    }
+
+    public func opaqueSignInInit(
+        envelope: Common_SecureEnvelope
+    ) async throws -> Common_SecureEnvelope {
+
+        Log.info("[MembershipServiceClient] OPAQUE sign-in init")
+
+        let client = try getClient()
+        let request = ClientRequest(message: envelope)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(35)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.opaqueSignInInitRequest(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[MembershipServiceClient] [OK] OPAQUE sign-in init complete")
+        return response
+    }
+
+    public func opaqueSignInComplete(
+        envelope: Common_SecureEnvelope
+    ) async throws -> Common_SecureEnvelope {
+
+        Log.info("[MembershipServiceClient] OPAQUE sign-in complete")
+
+        let client = try getClient()
+        let request = ClientRequest(message: envelope)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(35)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.opaqueSignInCompleteRequest(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[MembershipServiceClient] [OK] OPAQUE sign-in completed")
+        return response
+    }
+
     public func logout(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
+        envelope: Common_SecureEnvelope
+    ) async throws -> Common_SecureEnvelope {
 
-        return await executeSecureEnvelopeCall(
-            serviceType: .logout,
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            throw NetworkError.unknown("Protobuf client not yet generated")
-        }
+        Log.info("[MembershipServiceClient] Logout")
+
+        let client = try getClient()
+        let request = ClientRequest(message: envelope)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(30)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.logout(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[MembershipServiceClient] [OK] Logged out")
+        return response
     }
 
-    // MARK: - Validate Mobile Number
-    /// Validates a mobile number format
-    /// Migrated from: ValidateMobileNumberAsync()
-    public func validateMobileNumber(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
+    public func anonymousLogout(
+        envelope: Common_SecureEnvelope
+    ) async throws -> Common_SecureEnvelope {
 
-        return await executeSecureEnvelopeCall(
-            serviceType: .validateMobileNumber,
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            throw NetworkError.unknown("Protobuf client not yet generated")
-        }
+        Log.info("[MembershipServiceClient] Anonymous logout")
+
+        let client = try getClient()
+        let request = ClientRequest(message: envelope)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(30)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.anonymousLogout(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[MembershipServiceClient] [OK] Anonymous logged out")
+        return response
     }
 
-    // MARK: - Check Mobile Availability
-    /// Checks if a mobile number is available for registration
-    /// Migrated from: CheckMobileNumberAvailabilityAsync()
-    public func checkMobileAvailability(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
+    public func getLogoutHistory(
+        envelope: Common_SecureEnvelope
+    ) async throws -> Common_SecureEnvelope {
 
-        return await executeSecureEnvelopeCall(
-            serviceType: .checkMobileAvailability,
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            throw NetworkError.unknown("Protobuf client not yet generated")
-        }
-    }
+        Log.info("[MembershipServiceClient] Get logout history")
 
-    // MARK: - Verify OTP
-    /// Verifies an OTP code
-    /// Migrated from: VerifyCodeAsync()
-    public func verifyOTP(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
+        let client = try getClient()
+        let request = ClientRequest(message: envelope)
 
-        return await executeSecureEnvelopeCall(
-            serviceType: .verifyOtp,
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            throw NetworkError.unknown("Protobuf client not yet generated")
-        }
+        var options = CallOptions.defaults
+        options.timeout = .seconds(30)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.getLogoutHistory(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[MembershipServiceClient] [OK] Retrieved logout history")
+        return response
     }
 }

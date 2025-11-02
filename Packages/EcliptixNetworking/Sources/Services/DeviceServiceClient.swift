@@ -1,61 +1,133 @@
-import Foundation
-import GRPC
 import EcliptixCore
+import Foundation
+import GRPCCore
+import GRPCProtobuf
 
-// MARK: - Device Service Client
-/// Client for device-related RPC calls (registration, management)
-/// Migrated from: Ecliptix.Core/Services/Network/Rpc/UnaryRpcServices.cs (device methods)
-public final class DeviceServiceClient: BaseRPCService {
+@_exported import EcliptixProto
 
-    // TODO: Replace with generated protobuf client when available
-    // private let grpcClient: Ecliptix_Protobuf_Device_DeviceServiceClient
+@MainActor
+public final class DeviceServiceClient {
+    private let channelManager: GRPCChannelManager
+    private var grpcClient: Device_DeviceService.Client<HTTP2Transport>?
 
-    // MARK: - Register Device
-    /// Registers a new device with the backend
-    /// Migrated from: RegisterDeviceAsync()
+    nonisolated public init(channelManager: GRPCChannelManager) {
+        self.channelManager = channelManager
+        Log.info("[DeviceServiceClient] Initialized")
+    }
+    private func getClient() throws -> Device_DeviceService.Client<HTTP2Transport> {
+        if let client = grpcClient {
+            return client
+        }
+
+        let grpcBaseClient = try channelManager.getClient()
+        let client = Device_DeviceService.Client(wrapping: grpcBaseClient)
+        grpcClient = client
+        return client
+    }
+
+    public func establishSecureChannel(
+        envelope: Common_SecureEnvelope,
+        exchangeType: PubKeyExchangeType? = nil
+    ) async throws -> Common_SecureEnvelope {
+
+        Log.info("[DeviceServiceClient] Establishing secure channel")
+
+        let client = try getClient()
+
+        let request = ClientRequest(message: envelope)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(30)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.establishSecureChannel(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[DeviceServiceClient] [OK] Secure channel established")
+        return response
+    }
+
     public func registerDevice(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
+        envelope: Common_SecureEnvelope
+    ) async throws -> Common_SecureEnvelope {
 
-        return await executeSecureEnvelopeCall(
-            serviceType: .registerDevice,
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            // return try await self.grpcClient.registerDevice(request, callOptions: callOptions)
+        Log.info("[DeviceServiceClient] Registering device")
 
-            // Placeholder - will be replaced with actual gRPC call
-            throw NetworkError.unknown("Protobuf client not yet generated")
-        }
+        let client = try getClient()
+        let request = ClientRequest(message: envelope)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(30)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Common_SecureEnvelope>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.registerDevice(
+            request: request,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[DeviceServiceClient] [OK] Device registered")
+        return response
     }
 
-    // MARK: - Update Device Info
-    /// Updates device information
-    public func updateDeviceInfo(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
+    public func restoreSecureChannel(
+        request: Device_RestoreChannelRequest
+    ) async throws -> Device_RestoreChannelResponse {
 
-        return await executeSecureEnvelopeCall(
-            serviceType: .registerDevice, // Reuses same service type
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            throw NetworkError.unknown("Protobuf client not yet generated")
-        }
+        Log.info("[DeviceServiceClient] Restoring secure channel")
+
+        let client = try getClient()
+        let grpcRequest = ClientRequest(message: request)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(30)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Device_RestoreChannelRequest>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Device_RestoreChannelResponse>()
+
+        let response = try await client.restoreSecureChannel(
+            request: grpcRequest,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[DeviceServiceClient] [OK] Secure channel restored")
+        return response
     }
 
-    // MARK: - Get Device Status
-    /// Retrieves device status from backend
-    public func getDeviceStatus(
-        envelope: SecureEnvelope
-    ) async -> Result<SecureEnvelope, NetworkFailure> {
+    public func authenticatedEstablishSecureChannel(
+        request: Device_AuthenticatedEstablishRequest
+    ) async throws -> Common_SecureEnvelope {
 
-        return await executeSecureEnvelopeCall(
-            serviceType: .registerDevice, // Reuses same service type
-            envelope: envelope
-        ) { request, callOptions in
-            // TODO: Call generated protobuf client
-            throw NetworkError.unknown("Protobuf client not yet generated")
-        }
+        Log.info("[DeviceServiceClient] Establishing authenticated secure channel")
+
+        let client = try getClient()
+        let grpcRequest = ClientRequest(message: request)
+
+        var options = CallOptions.defaults
+        options.timeout = .seconds(30)
+
+        let serializer = GRPCProtobuf.ProtobufSerializer<Device_AuthenticatedEstablishRequest>()
+        let deserializer = GRPCProtobuf.ProtobufDeserializer<Common_SecureEnvelope>()
+
+        let response = try await client.authenticatedEstablishSecureChannel(
+            request: grpcRequest,
+            serializer: serializer,
+            deserializer: deserializer,
+            options: options
+        )
+
+        Log.info("[DeviceServiceClient] [OK] Authenticated secure channel established")
+        return response
     }
 }
